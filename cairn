@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Run the Cairn CLI from anywhere; state lives in ./.cairn unless CAIRN_HOME is set.
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$DIR/node_modules/.bin/tsx" "$DIR/src/cli.ts" "$@"

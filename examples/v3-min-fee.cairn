@@ -1,0 +1,7 @@
+// v3 — edit ONE definition. The scratch file holds only what you're changing;
+// the codebase works out everything that depends on it.
+// Business change: fee is still 1%, but never less than 1.
+
+def fee(o: { qty: number, price: number }): number = max(subtotal(o) * 0.01, 1)
+
+test minFeeApplies = fee({ qty: 1, price: 1 }) == 1

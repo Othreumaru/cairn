@@ -1,0 +1,32 @@
+// v1 — a tiny order-pricing domain, plus a few tests that exercise the language itself.
+
+def subtotal(o: { qty: number, price: number }): number = o.qty * o.price
+
+def fee(o: { qty: number, price: number }): number = subtotal(o) * 0.01
+
+def total(o: { qty: number, price: number }): number = subtotal(o) + fee(o)
+
+def receipt(o: { sym: string, qty: number, price: number }): string =
+  o.sym ++ " x" ++ str(o.qty) ++ " = " ++ str(round2(total(o)))
+
+def applyTwice(f: (n: number) => number, x: number): number = f(f(x))
+
+def fact(n: number): number = if n <= 1 then 1 else n * fact(n - 1)
+
+// mutual recursion: hashed together as one group
+def isEven(n: number): boolean = if n == 0 then true else isOdd(n - 1)
+def isOdd(n: number): boolean = if n == 0 then false else isEven(n - 1)
+
+test subtotalWorks = subtotal({ qty: 10, price: 5 }) == 50
+test feeIsOnePercent = fee({ qty: 100, price: 1 }) == 1
+test totalAddsFee = total({ qty: 100, price: 1 }) == 101
+test receiptFormat = receipt({ sym: "VOD", qty: 100, price: 1 }) == "VOD x100 = 101"
+
+// width subtyping: extra fields are fine where fewer are required
+test extraFieldsOk = subtotal({ qty: 2, price: 3, venue: "LSE" }) == 6
+
+// contextual typing: `x` gets its type from applyTwice's signature — no annotation needed
+test lambdaInferred = applyTwice(x => x * 3, 2) == 18
+
+test factorial = fact(5) == 120
+test parity = isEven(10) && isOdd(7)

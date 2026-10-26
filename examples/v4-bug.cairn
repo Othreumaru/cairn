@@ -1,0 +1,3 @@
+// v4 — a typo: 0.1 instead of 0.01. It type-checks fine; only the tests can catch it.
+
+def fee(o: { qty: number, price: number }): number = max(subtotal(o) * 0.1, 1)

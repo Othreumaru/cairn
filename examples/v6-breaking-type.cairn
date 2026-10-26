@@ -1,0 +1,5 @@
+// v6 — an incompatible signature change: subtotal now *requires* a currency field.
+// Everything that passes a { qty, price } record to it is now ill-typed.
+
+def subtotal(o: { qty: number, price: number, ccy: string }): number =
+  if o.ccy == "GBX" then o.qty * o.price / 100 else o.qty * o.price

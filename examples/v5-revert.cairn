@@ -1,0 +1,3 @@
+// v5 — fix the typo by restoring the v3 body. Same code => same hash => every test result is cached.
+
+def fee(o: { qty: number, price: number }): number = max(subtotal(o) * 0.01, 1)

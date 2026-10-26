@@ -1,0 +1,21 @@
+{
+  "name": "cairn",
+  "version": "1.0.0",
+  "description": "Toy content-addressed language with bidirectional types and a gated deploy runtime",
+  "directories": {
+    "example": "examples",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc",
+    "demo": "sh examples/demo.sh"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "type": "module"
+}

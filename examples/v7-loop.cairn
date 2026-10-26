@@ -1,0 +1,6 @@
+// v7 — a definition that never terminates. The deploy gate runs tests under a budget,
+// so a hung test fails the gate instead of hanging the runtime.
+
+def settle(n: number): number = if n == 0 then 0 else settle(n + 1)
+
+test settleTerminates = settle(3) == 0
