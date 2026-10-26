@@ -24,7 +24,7 @@ Requires Node 18+.
 
 ```sh
 npm install
-npm test               # 21 unit tests
+npm test               # 26 unit tests
 sh examples/demo.sh    # end-to-end walkthrough (output also in DEMO.md)
 ./cairn                # CLI help
 ```
@@ -38,6 +38,7 @@ The workflow is the Unison "scratch file" model: a source file holds only what y
 ./cairn eval 'fee({ qty: 100, price: 1 })'
 ./cairn dependents subtotal               # blast radius of a change, before you make it
 ./cairn rename fee commission             # free: no hash changes, no tests run
+./cairn upgrade                           # move code onto new builtin versions; affected tests re-run
 ./cairn rollback
 ```
 
@@ -57,6 +58,7 @@ State lives in `./.cairn/state.json` (override with `CAIRN_HOME`).
 | Test cache by hash | `runtime.ts` | A test result is a permanent fact about a hash. A test's hash transitively covers its dependencies, so cache invalidation is exact. Reverting code gets back old hashes and therefore old results. |
 | Deploy gate | `runtime.ts` | `live` is only written by `deploy`: all tests must pass (cached or freshly run), then the namespace pointer is swapped atomically. |
 | Rollback | `runtime.ts` | The previous namespace is just another pointer, and the code it refers to is still in the append-only store. |
+| Versioned builtins | `builtins.ts`, `hash.ts`, `codebase.ts` | Builtins are immutable and versioned; hash-form code pins `name@version`, so a builtin's version is part of every hash that uses it. Publishing a new version changes nothing stored: old code (and rollback targets) keep running the old version. `upgrade` re-hashes the code still pinned to an old version, propagates to dependents, and the next deploy re-runs exactly the tests that reach the changed builtin. Code re-hashed for an unrelated edit keeps its pins. |
 | Runaway tests | `eval.ts`, `runtime.ts` | Evaluation budget plus stack-overflow capture: a non-terminating test fails the gate instead of hanging it. |
 
 ## Source layout

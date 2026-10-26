@@ -2,7 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CairnError } from "./ast.js";
-import { declOf, describeChange, emptyState, invert, nsId, remove, rename, State, transitiveDependents, update, view } from "./codebase.js";
+import { declOf, describeChange, emptyState, invert, nsId, remove, rename, staleBuiltins, State, transitiveDependents, update, UpdateReport, upgrade, view } from "./codebase.js";
 import { short } from "./hash.js";
 import { deploy, evaluate, rollback, TestRun } from "./runtime.js";
 import { showType } from "./pretty.js";
@@ -27,6 +27,32 @@ function printRun(r: TestRun) {
   }
 }
 
+function printUpdate(state: State, r: UpdateReport, title: string, dryRun: boolean): number {
+  console.log(`${title}${dryRun ? " (dry run)" : ""}:`);
+  if (r.fileErrors.length) {
+    for (const e of r.fileErrors) console.log(`  ✗ ${e.name}${e.line ? ` (line ${e.line}:${e.col})` : ""}: ${e.error}`);
+    console.log("\nnothing applied — fix the type errors above.");
+    return 1;
+  }
+  const interesting = r.changes.filter((c) => c.kind.k !== "unchanged");
+  const unchanged = r.changes.length - interesting.length;
+  for (const c of interesting) console.log(`  ${describeChange(c)}`);
+  if (unchanged) console.log(`  = ${unchanged} definition(s) unchanged (identical hashes)`);
+  if (!r.ok) {
+    console.log("\nREJECTED — the change breaks the definitions marked ✗. Nothing applied.");
+    console.log("Update them in the same file (or keep the old type) and try again.");
+    return 1;
+  }
+  if (!interesting.length) {
+    console.log("\nno changes — every definition hashes to what is already in the codebase.");
+    return 0;
+  }
+  console.log(`\ntests: ${r.testsToRun.length} will run on next deploy${r.testsToRun.length ? ` (${r.testsToRun.join(", ")})` : ""}, ${r.testsCached.length} cached`);
+  if (r.applied) save(state);
+  console.log(r.applied ? `dev is now ${nsLabel(nsId(state.dev))}` : "dry run — nothing applied");
+  return 0;
+}
+
 function main(argv: string[]) {
   const [cmd, ...args] = argv;
   const state = load();
@@ -37,31 +63,11 @@ function main(argv: string[]) {
     case "update": {
       const file = rest[0];
       if (!file) throw new CairnError("usage: cairn update <file.cairn> [--dry-run]");
-      const r = update(state, readFileSync(file, "utf8"), { dryRun });
-      console.log(`impact of ${file}${dryRun ? " (dry run)" : ""}:`);
-      if (r.fileErrors.length) {
-        for (const e of r.fileErrors) console.log(`  ✗ ${e.name}${e.line ? ` (line ${e.line}:${e.col})` : ""}: ${e.error}`);
-        console.log("\nnothing applied — fix the type errors above.");
-        return 1;
-      }
-      const interesting = r.changes.filter((c) => c.kind.k !== "unchanged");
-      const unchanged = r.changes.length - interesting.length;
-      for (const c of interesting) console.log(`  ${describeChange(c)}`);
-      if (unchanged) console.log(`  = ${unchanged} definition(s) unchanged (identical hashes)`);
-      if (!r.ok) {
-        console.log("\nREJECTED — the change breaks the definitions marked ✗. Nothing applied.");
-        console.log("Update them in the same file (or keep the old type) and try again.");
-        return 1;
-      }
-      if (!interesting.length) {
-        console.log("\nno changes — every definition hashes to what is already in the codebase.");
-        return 0;
-      }
-      console.log(`\ntests: ${r.testsToRun.length} will run on next deploy${r.testsToRun.length ? ` (${r.testsToRun.join(", ")})` : ""}, ${r.testsCached.length} cached`);
-      if (r.applied) save(state);
-      console.log(r.applied ? `dev is now ${nsLabel(nsId(state.dev))}` : "dry run — nothing applied");
-      return 0;
+      return printUpdate(state, update(state, readFileSync(file, "utf8"), { dryRun }), `impact of ${file}`, dryRun);
     }
+
+    case "upgrade":
+      return printUpdate(state, upgrade(state, { dryRun }), "upgrading definitions pinned to old builtin versions", dryRun);
 
     case "deploy": {
       console.log(`deploy: dev ${nsLabel(nsId(state.dev))} → live (currently ${nsLabel(state.live ? nsId(state.live) : null)})`);
@@ -105,7 +111,10 @@ function main(argv: string[]) {
 
     case "view": {
       const ns = args.includes("--live") ? state.live ?? {} : state.dev;
-      for (const n of rest.length ? rest : Object.keys(ns).sort()) console.log(`${short(ns[n])}  ${view(state, ns, n)}`);
+      for (const n of rest.length ? rest : Object.keys(ns).sort()) {
+        const stale = n in ns ? staleBuiltins(state.entries[ns[n]]) : [];
+        console.log(`${short(ns[n])}  ${view(state, ns, n)}${stale.length ? `  -- pinned to old builtins: ${stale.join(", ")}` : ""}`);
+      }
       return 0;
     }
 
@@ -145,6 +154,8 @@ function main(argv: string[]) {
       console.log(`dev:  ${nsLabel(nsId(state.dev))}  (${Object.keys(state.dev).length} names)`);
       console.log(`live: ${nsLabel(state.live ? nsId(state.live) : null)}${state.live ? `  (${Object.keys(state.live).length} names)` : ""}`);
       console.log(`deploy history: ${state.history.length} previous version(s); cached test results: ${Object.keys(state.testCache).length}`);
+      const stale = Object.keys(state.dev).filter((n) => staleBuiltins(state.entries[state.dev[n]]).length);
+      if (stale.length) console.log(`pinned to old builtin versions: ${stale.sort().join(", ")} (run \`cairn upgrade\`)`);
       return 0;
     }
 
@@ -163,6 +174,7 @@ function main(argv: string[]) {
   view [name...] [--live]     print definitions (rendered from the hashed AST)
   deps <name>                 direct dependencies of a definition
   dependents <name>           everything a change to <name> would affect
+  upgrade [--dry-run]         move code pinned to old builtin versions onto the current ones
   rename <old> <new>          rename (free: hashes don't change)
   delete <name>               remove a name (refused if anything depends on it)
   status | reset`);

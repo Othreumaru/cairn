@@ -3,7 +3,7 @@ import { Checker } from "./check.js";
 import { invert, Namespace, nsId, State, TestResult } from "./codebase.js";
 import { Evaluator, showValue } from "./eval.js";
 import { normalize, short } from "./hash.js";
-import { BUILTINS } from "./builtins.js";
+import { BUILTINS, currentVersion } from "./builtins.js";
 import { parseExpr } from "./parser.js";
 import { showType } from "./pretty.js";
 
@@ -139,7 +139,7 @@ export function evaluate(state: State, src: string, which: "live" | "dev" = "liv
   const type = checker.synth(e, new Map());
   const hashForm = normalize(e, (n) => {
     if (n in ns) return { t: "ref", hash: ns[n] };
-    if (n in BUILTINS) return { t: "builtin", name: n };
+    if (n in BUILTINS) return { t: "builtin", name: n, v: currentVersion(n) };
     throw new CairnError(`unknown name '${n}'`);
   });
   const ev = new Evaluator((h) => state.entries[h]);

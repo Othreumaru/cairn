@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { CairnError, Decl, DeclKind, Expr, Type } from "./ast.js";
-import { BUILTINS } from "./builtins.js";
+import { BUILTINS, currentVersion } from "./builtins.js";
 
 /**
  * Content addressing.
  *
  * A definition's hash is computed from its *normalised* AST:
  *   - references to other definitions are replaced by their hashes,
+ *   - references to builtins carry the builtin's version,
  *   - local binders are renamed to their de Bruijn level (`_0`, `_1`, …),
  *   - spans/whitespace/comments are gone, record literal fields are sorted.
  * So renaming a parameter, reformatting, or renaming a *dependency* never changes a hash,
@@ -86,6 +87,17 @@ export function freeGlobals(e: Expr, bound: ReadonlySet<string> = new Set(), out
       freeGlobals(e.b, bound, out);
       break;
   }
+  return out;
+}
+
+/** Builtin versions referenced by a hash-form body: name -> version. */
+export function builtinsUsed(e: Expr, out: Record<string, number> = {}): Record<string, number> {
+  if (e.t === "builtin") out[e.name] = e.v;
+  for (const v of Object.values(e))
+    if (v && typeof v === "object") {
+      if (Array.isArray(v)) v.forEach((x) => x && typeof x === "object" && ("t" in x ? builtinsUsed(x as Expr, out) : "value" in x ? builtinsUsed((x as { value: Expr }).value, out) : 0));
+      else if ("t" in v) builtinsUsed(v as Expr, out);
+    }
   return out;
 }
 
@@ -220,7 +232,17 @@ export function denormalize(entry: Entry, nameOf: (hash: string) => string | und
         return { t: "if", c: go(e.c, scope), a: go(e.a, scope), b: go(e.b, scope) };
     }
   };
-  return { kind: entry.kind, name: nameOf(entry.hash) ?? entry.origName, sig: entry.sig, body: go(entry.body, new Map()), span: { line: 0, col: 0 } };
+  // Keep the builtin versions this code was hashed against, so re-hashing it (e.g. as a dependent
+  // of an edit) never silently moves it onto a newer builtin.
+  const builtins = builtinsUsed(entry.body);
+  return {
+    kind: entry.kind,
+    name: nameOf(entry.hash) ?? entry.origName,
+    sig: entry.sig,
+    body: go(entry.body, new Map()),
+    span: { line: 0, col: 0 },
+    builtins: Object.keys(builtins).length ? builtins : undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -280,20 +302,22 @@ export function hashDecls(decls: Decl[], external: (name: string) => string | un
   for (const comp of comps) {
     const self = comp[0];
     const isCycle = comp.length > 1 || free.get(self)!.has(self);
-    const resolve: Resolve = (name) => {
-      if (isCycle && comp.includes(name)) return { t: "cref", index: comp.indexOf(name) };
-      const local = result.get(name);
-      if (local) return { t: "ref", hash: local.hash };
-      const ext = byName.has(name) ? undefined : external(name);
-      if (ext) return { t: "ref", hash: ext };
-      if (name in BUILTINS) return { t: "builtin", name };
-      throw new CairnError(`unknown name '${name}'`);
-    };
+    const resolveFor =
+      (d: Decl): Resolve =>
+      (name) => {
+        if (isCycle && comp.includes(name)) return { t: "cref", index: comp.indexOf(name) };
+        const local = result.get(name);
+        if (local) return { t: "ref", hash: local.hash };
+        const ext = byName.has(name) ? undefined : external(name);
+        if (ext) return { t: "ref", hash: ext };
+        if (name in BUILTINS) return { t: "builtin", name, v: d.builtins?.[name] ?? currentVersion(name) };
+        throw new CairnError(`unknown name '${name}'`);
+      };
 
     const normalised = comp.map((name) => {
       const d = byName.get(name)!;
       const localNames: string[] = [];
-      const body = normalize(d.body, resolve, new Map(), 0, localNames);
+      const body = normalize(d.body, resolveFor(d), new Map(), 0, localNames);
       return { d, body, localNames, payload: { kind: d.kind, sig: d.sig, body } };
     });
 

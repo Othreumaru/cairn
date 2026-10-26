@@ -1,5 +1,5 @@
 import { CairnError, Expr, T, Type } from "./ast.js";
-import { BUILTINS } from "./builtins.js";
+import { BUILTINS, builtin, currentVersion } from "./builtins.js";
 import { showExpr, showType } from "./pretty.js";
 import { isPrim, lub, subtype } from "./types.js";
 
@@ -22,10 +22,14 @@ type Locals = ReadonlyMap<string, Type>;
 const err = (msg: string, e: Expr) => new CairnError(msg, e.span, e);
 
 export class Checker {
-  constructor(private globals: Globals) {}
+  /** @param pins builtin versions to check against (code rebuilt from the store); others use the current version */
+  constructor(
+    private globals: Globals,
+    private pins: Record<string, number> = {},
+  ) {}
 
   lookup(name: string, locals: Locals, e: Expr): Type {
-    const t = locals.get(name) ?? this.globals(name) ?? BUILTINS[name]?.type;
+    const t = locals.get(name) ?? this.globals(name) ?? (name in BUILTINS ? builtin(name, this.pins[name] ?? currentVersion(name)).type : undefined);
     if (!t) throw err(`unknown name '${name}'`, e);
     return t;
   }

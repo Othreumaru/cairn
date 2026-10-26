@@ -1,5 +1,5 @@
 import { CairnError, Expr } from "./ast.js";
-import { BUILTINS } from "./builtins.js";
+import { builtin } from "./builtins.js";
 import { Entry, short } from "./hash.js";
 
 /**
@@ -13,7 +13,7 @@ export type Value =
   | boolean
   | { tag: "rec"; fields: Readonly<Record<string, Value>> }
   | { tag: "clo"; params: string[]; body: Expr; env: Env; ctx: Entry }
-  | { tag: "builtin"; name: string };
+  | { tag: "builtin"; name: string; v: number };
 
 type Env = ReadonlyMap<string, Value>;
 
@@ -64,7 +64,7 @@ export class Evaluator {
       case "cref":
         return this.global(ctx.group!.members[e.index]);
       case "builtin":
-        return { tag: "builtin", name: e.name };
+        return { tag: "builtin", name: e.name, v: e.v };
       case "lam":
         return { tag: "clo", params: e.params.map((p) => p.name), body: e.body, env, ctx };
       case "call": {
@@ -123,7 +123,7 @@ export class Evaluator {
 
   apply(f: Value, args: Value[]): Value {
     if (--this.fuel < 0) throw new FuelExhausted("evaluation budget exhausted (possible infinite recursion)");
-    if (typeof f === "object" && f.tag === "builtin") return BUILTINS[f.name].impl(...args);
+    if (typeof f === "object" && f.tag === "builtin") return builtin(f.name, f.v).impl(...args);
     if (typeof f === "object" && f.tag === "clo") {
       const inner = new Map(f.env);
       f.params.forEach((p, i) => inner.set(p, args[i]));
@@ -141,6 +141,6 @@ export function showValue(v: Value): string {
       .sort()
       .map((k) => `${k}: ${showValue(v.fields[k])}`)
       .join(", ")} }`;
-  if (v.tag === "builtin") return `<builtin ${v.name}>`;
+  if (v.tag === "builtin") return `<builtin ${v.name}@${v.v}>`;
   return `<function/${v.params.length}>`;
 }
