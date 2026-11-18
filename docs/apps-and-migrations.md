@@ -24,6 +24,8 @@ Prior art worth reading alongside: [Elm](https://elm-lang.org) (the app architec
 - Keep everything that touches the outside world (HTTP, WebSockets, files, databases) in
   **plugins**, so new kinds of entry point and storage can be added without changing the language.
 - **Prune** what old versions leave behind, so history does not grow forever.
+- Let code be **proved**, not only tested, where a property can be stated, and keep tests for
+  what proofs cannot cover.
 
 ## Non-goals (for now)
 
@@ -66,8 +68,9 @@ The app architecture depends on features Cairn does not have yet.
    and 5 work. The cost is that tags are global names: `Reset` means the same thing in every
    union that has it. `case` must be exhaustive.
 
-2. **Lists**, with total operations only (`map`, `fold`, `filter`, `length`). Anything that could
-   fail returns a result type: `head(xs)` returns `Maybe(T)`.
+2. **Lists**, with total operations only (`map`, `fold`, `filter`, `length`, `range`). Anything
+   that could fail returns a result type: `head(xs)` returns `Maybe(T)`. These replace most
+   recursion (item 6).
 
 3. **Built-in parameterized types.** `List(T)`, `Maybe(T)` and `Result(E, T)`, and the builtins
    over them (`map`, `fold`, …), are parameterized. They are special-cased in the checker, the way
@@ -113,6 +116,36 @@ The app architecture depends on features Cairn does not have yet.
    - **Overflow** is an error raised at the operation that overflowed, never a value. It is too rare
      to justify a `Result` on every multiplication. Inside a migration it is caught by the
      transactional switch (section 4).
+
+6. **Recursion is restricted by default**, so that code terminates and can be proved (section 11).
+   There are three levels:
+
+   - **Default: no general recursion.** Code iterates with `map`, `filter`, `fold` and `range`:
+     `fact(n)` is `fold(range(1, n + 1), 1, (acc, i) => acc * i)`. Such code is total, so it can be
+     used anywhere, including migrations, invariants and proved properties.
+   - **Structural recursion**, once recursive types exist: a function may call itself only on a part
+     of its input (the children of a tree node, the tail of a list). The checker verifies that from
+     the code alone, so it still always terminates. This is how Agda and Lean handle it.
+   - **`partial def`**, an explicit escape hatch for general recursion (unbounded search, parsing
+     arbitrary nested input, iterating to convergence). It runs under the evaluation budget as all
+     code does today, cannot be used in migrations, fixes, invariants or proved properties, and is
+     visible in review and in the hash.
+
+   Removing recursion does not remove the need for induction: proving something about a `fold`
+   over a list of any length still needs it. The gain is that induction happens in one place the
+   language owns. The verifier knows the induction rule for `fold`, checked once, instead of facing
+   every user's own recursion pattern. Starlark, Dhall and Clarity forbid general recursion
+   outright, and run real workloads; the escape hatch keeps the rare algorithm that needs it
+   possible.
+
+   This also turns section 4's rule that migrations must terminate from a special case into the
+   general rule.
+
+7. **An exact number type** is needed before the solver reasons about numbers (section 11).
+   Cairn's numbers are JavaScript floats, where `0.1 + 0.2 != 0.3`. A solver either treats them as
+   exact reals, which is unsound for rounding, or models IEEE floats precisely, which is slow. An
+   exact decimal (or integer) type, at least for money-like values, keeps proofs both sound and
+   fast. Which one is an open question.
 
 ## 2. Apps
 
@@ -347,7 +380,7 @@ Each way a migration could fail is ruled out or made harmless:
 |---|---|
 | Returns the wrong shape | The type checker: the result must be exactly `New`. |
 | Produces invalid data or crashes partway | `NaN` and `Infinity` cannot occur, and division by zero must be handled in the types (section 1). The one remaining runtime error is numeric overflow, which is very rare; if it happens, the transactional switch leaves everything unchanged. |
-| Never finishes | A migration and everything it reaches must be **non-recursive**. Hashing already finds recursion groups, so the check is cheap. Iteration uses total list operations only. |
+| Never finishes | A migration and everything it reaches must be total: no `partial def` (section 1, item 6). Hashing already finds recursion groups, so the check is cheap. Iteration uses total list operations only. |
 | Exceeds memory or time | The **transactional switch** below: if the real run fails, nothing changes. A **dry run** on the live state at `update` time gives early warning, but the state can change before the switch, so the dry run is not the guarantee. |
 | Does the wrong thing | Not decidable. At least one test per migration (required), and replay (section 8). |
 
@@ -374,7 +407,7 @@ has the same type, there is a separate declaration for it:
 fix backfillLastVisit(m: Model): Model = { ...m, lastVisit: guessFrom(m.visits) }
 ```
 
-A `fix` must have the same input and output type. It is checked like a migration (non-recursive,
+A `fix` must have the same input and output type. It is checked like a migration (total, no `partial def`,
 no invalid operations, at least one test), appended to the log, and always runs once, in order. It
 is a separate keyword so the checker never confuses an intended fix with a pointless same-type
 migration. Without it, fixing data would require inventing a fake type change.
@@ -741,6 +774,91 @@ cairn prune --before v2.3.0+s4 --dry-run
 A prune past `live` is refused. Retiring a major that still receives traffic, or dropping pending
 command results, needs `--force`.
 
+## 11. Verification
+
+Tests check examples. A solver (an SMT solver such as Z3, available for Node as WebAssembly) can
+prove a property for **every** input, or return a concrete counterexample. Cairn suits this
+unusually well: verification is hard mainly because of mutation, hidden effects and unbounded
+loops, and Cairn code has none of these (section 1, item 6).
+
+### One kind of claim, several kinds of evidence
+
+A test and a proof are two strengths of evidence for the same kind of statement:
+
+```
+test exactlyHundred = shipping(100) == 0
+property freeShipping = forall total: number. total >= 100 => shipping(total) == 0
+```
+
+A `property` is written once, and Cairn uses the strongest evidence it can get:
+
+1. **Proved:** the solver shows it holds for every input.
+2. **Counterexample:** the solver finds an input where it fails (`total = 99.5`). That is a real
+   failure, and the counterexample becomes an ordinary cached **test**, so it stays as a
+   regression check after the bug is fixed.
+3. **Unknown:** too hard, or the solver reached its work limit. Cairn falls back to checking
+   inputs generated from the types (property testing): 0, -1, 1, very large and fractional numbers,
+   `""` and Unicode strings, and records combining these. Weaker evidence, but nothing is blocked
+   only because the solver gave up.
+
+### Proofs are cached facts
+
+"Property P holds for hash H" is as permanent as "test T passes", provided the solver is
+deterministic: its version is pinned (recorded like builtins and plugins), and it is limited by an
+amount of work rather than wall-clock time, so the same question always gets the same answer. A
+proof is cached by (definition hash, property hash, solver version) and redone only when something
+it depends on changes.
+
+### The gate
+
+By default, every test and property must at least pass (proved, or checked on generated inputs).
+A project can demand more in `cairn.json`, like coverage and mutation minimums, for example that
+properties about `Model` invariants and migrations must be **proved**.
+
+### How it fits coverage and mutation testing
+
+- **Mutation testing:** a mutant is also killed when a property stops being provable on it. And
+  the solver can prove a mutant **equivalent** to the original (such as a threshold where both
+  sides give the same result) and leave it out of the score, which fixes mutation testing's main
+  weakness.
+- **Coverage:** a proved property covers every path of the definitions it mentions, so proved code
+  does not need example tests just to raise coverage.
+- **Redundant tests:** a test that is one case of a proved property adds nothing; Cairn reports it.
+
+### Where proofs pay off most
+
+1. **State invariants:** `visits >= 0` on a `Model`, proved to hold after every route, migration
+   and `fix`, for every possible request, where tests only sample.
+2. **Migrations:** proved to produce a valid state for every old state, not only the one the dry
+   run saw.
+3. **Refinement types:** types with a condition, such as `{ n: number | n != 0 }`. `NonZero`
+   (section 1) is one. With a solver, the checker knows that inside `if count != 0` the value is
+   non-zero, so `total / count` is proved safe there without a `Result`. Subtyping extends
+   naturally: `{ n | n > 5 } <: { n | n != 0 }` because `n > 5` implies `n != 0`.
+
+### Why tests remain
+
+Proofs replace most tests, not all of them:
+
+- **Tests check the specification.** A proof shows the code matches the property, not that the
+  property is what was meant: if the rule is "free shipping over 100" and the property says
+  `total >= 100`, the proof succeeds anyway. A concrete example from the requirement ("an order of
+  exactly 100 pays shipping") catches it. Examples are easier to get right than general statements,
+  and two independent descriptions catch mistakes in either.
+- **Some behaviour is as long to specify as to write.** Proofs suit partial properties ("never
+  negative", "always valid"); the full specification of `fee`'s exact outputs is essentially its
+  code again. For "this order costs exactly 2.50", a test is the specification.
+- **Some things are out of reach:** `partial def`, undecidable questions, plugins (trusted
+  TypeScript, including the JSON mapping) and the solver itself.
+
+As verification grows, tests should shrink to a small set of examples that document intent.
+
+### What to avoid
+
+- **Mandatory proofs by default**, for the same reasons as mandatory 100% coverage: deploys would be
+  blocked by solver limits and specification work.
+- **Solver reasoning over floats** before an exact number type exists (section 1, item 7).
+
 ## Implementation order
 
 **Prototype status.** Steps 2 and 3 exist in a first form. Defs are bound with
@@ -751,13 +869,17 @@ the `X-Cairn-Namespace` header) and `ws` (typed JSON messages; connections live 
 keep their message types and are closed with 1012 when a deploy changes them). Plugins reach the
 codebase only through a `Runtime` the host provides. Instances follow a shared state file saved by
 atomic rename, so one deploy switches every instance in milliseconds (`examples/serve-demo.sh`).
+Test coverage and mutation testing (section 8) are built: both are cached per hash and can be
+enforced by the deploy gate through `cairn.json`.
 Not yet built: logical resources and per-environment config (ports are command-line flags),
 pinning plugins by package hash and upgrading pinned plugin versions, `Reply`/`Await`, the store
 split, and compare-and-swap between concurrent deployers.
 
-1. Tagged unions with `case`, lists and the built-in parameterized types, type aliases (including
-   recursive types), and the number rules (`NonZero`, with non-zero literals typed `NonZero`;
-   division returning `Result` unless the divisor is a `NonZero`; overflow as an error).
+1. Tagged unions with `case`, lists with `fold` and `range`, the built-in parameterized types, type
+   aliases (including recursive types), and the number rules (`NonZero`, with non-zero literals
+   typed `NonZero`; division returning `Result` unless the divisor is a `NonZero`; overflow as an
+   error). Then restricted recursion: structural recursion and `partial def`, with existing
+   recursive examples rewritten with `fold` or marked `partial`.
 2. Stateless HTTP routes with typed requests (path parameters, query, body), `cairn serve`,
    request checking and response projection, per-request evaluation budgets, the
    `X-Cairn-Namespace` header; the store split; instant deploys across several local instances.
@@ -777,6 +899,10 @@ split, and compare-and-swap between concurrent deployers.
 9. Replay against recorded requests; OpenAPI generation; HTTP caching.
 10. Several major versions and canaries, for stateless apps and for stateful apps whose versions
     share the same `Model` type.
+11. Verification: `property` declarations with property testing first (generators from types,
+    counterexamples kept as tests); then the solver behind them, with proofs cached and the solver
+    pinned; then proved `Model` invariants and migration properties; refinement types once the
+    exact number type exists.
 
 ## Open questions
 
@@ -790,5 +916,8 @@ split, and compare-and-swap between concurrent deployers.
 - **Plugin distribution and sandboxing.** Plugins are pinned by package hash (section 9). How are
   they packaged and fetched, and is sandboxing (for example, running plugins in a separate process
   with only the capabilities they declare) worth it later?
+- **The exact number type.** A decimal type (exact for money, familiar from SQL), integers plus
+  exact rationals, or both? And does it replace `number`, or sit beside it with floats kept for
+  measurements?
 - **Expired results.** Should a command result that arrives after its horizon be dropped silently
   (and logged), or delivered as a typed `Expired` value that code must handle?
