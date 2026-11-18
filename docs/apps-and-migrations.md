@@ -155,6 +155,14 @@ The app architecture depends on features Cairn does not have yet.
    exact decimal (or integer) type, at least for money-like values, keeps proofs both sound and
    fast. Which one is an open question.
 
+   Each number type carries **fixed, built-in algebraic laws**; users do not declare them. For an
+   exact type, `+` and `*` are commutative and associative. For floats, they are commutative but
+   **not associative**: `(0.1 + 0.2) + 0.3 != 0.1 + (0.2 + 0.3)`. That matters beyond proofs: if
+   Cairn ever reordered or parallelised a sum of floats, the result could change from run to run,
+   and a test result would no longer be a permanent fact about a hash. Reordering is therefore
+   only allowed where the laws permit it (section 11, "Algebraic laws"), which is one more reason
+   for the exact type.
+
 ## 2. Apps
 
 An app is a new kind of declaration, alongside `def` and `test`. It declares its routes, each
@@ -870,6 +878,40 @@ Proofs replace most tests, not all of them:
 
 As verification grows, tests should shrink to a small set of examples that document intent.
 
+### Algebraic laws
+
+Laws such as commutativity are useful on the operations people write to **combine** values:
+`merge(a, b)`, `maxOf(a, b)`, `addCounts(a, b)`. A definition can declare them:
+
+```
+def maxOf(a: number, b: number): number = max(a, b)
+laws maxOf: commutative, associative, idempotent
+```
+
+A declared law is a property like any other, so it is **checked, never trusted**: proved by the
+solver, or checked on generated inputs when the solver cannot decide, and a counterexample refuses
+the declaration. The result is cached by hash like a test. This avoids the classic weakness of type
+classes such as Haskell's `Monoid`, whose instances claim laws that nothing checks.
+
+What declared laws unlock:
+
+1. **Order-independent folds.** `fold` runs in order. An unordered fold, which may split the work,
+   run it in parallel or combine partial results from several places, is only accepted for an
+   operation whose laws make the order irrelevant (associative and commutative), so its result,
+   and every cached fact built on it, stays deterministic.
+2. **State across several instances.** If a `Model`'s updates merge with an operation that is
+   commutative, associative and idempotent, several instances can each update their own copy and
+   merge later without conflicts. That is the idea behind CRDTs (conflict-free replicated data
+   types, used by collaborative editors). Declared laws let the checker confirm that a `Model`
+   qualifies, which is a promising answer to the open question about stateful apps across
+   instances.
+3. **Stronger proofs and mutation testing:** the solver can use proved laws as facts about the
+   operation, and a mutant that breaks a declared law is caught.
+
+Full type classes (one interface with instances chosen by type) are not part of this design: they
+need user generics, which are a non-goal for now. Laws declared on specific operations give almost
+all of the benefit without that machinery.
+
 ### What to avoid
 
 - **Mandatory proofs by default**, for the same reasons as mandatory 100% coverage: deploys would be
@@ -921,12 +963,15 @@ split, and compare-and-swap between concurrent deployers.
 11. Verification: `property` declarations with property testing first (generators from types,
     counterexamples kept as tests); then the solver behind them, with proofs cached and the solver
     pinned; then proved `Model` invariants and migration properties; refinement types once the
-    exact number type exists.
+    exact number type exists. Declared algebraic laws (`laws f: commutative, ...`), checked like
+    properties, and an unordered `fold` that requires them.
 
 ## Open questions
 
 - **Stateful apps across instances.** Where does a stateful app's model live once it outgrows one
-  instance, and how does the transactional switch work there?
+  instance, and how does the transactional switch work there? One direction: a `Model` whose
+  updates merge by an operation with proved commutative, associative and idempotent laws (section
+  11, "Algebraic laws") can be updated on each instance and merged later, CRDT-style.
 - **The first version.** Does the first deploy of an app start at `1.0.0` or `0.1.0`, and do
   `0.x` versions relax the rules as in semver?
 - **Binding syntax.** Annotations on each definition (`@http("POST /quote") def quote ...`, as in
