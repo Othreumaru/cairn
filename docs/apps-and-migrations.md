@@ -26,12 +26,17 @@ Prior art worth reading alongside: [Elm](https://elm-lang.org) (the app architec
 - **Prune** what old versions leave behind, so history does not grow forever.
 - Let code be **proved**, not only tested, where a property can be stated, and keep tests for
   what proofs cannot cover.
+- Make review cheaper by changing what reviewers have to read (section 12).
+- Make an **event log** a core idea: state as projections folded from typed events, with eventual
+  consistency that the checker can reason about (section 13).
+- Treat each running instance as a **repository** that can be pushed to, pulled from and forked,
+  like Git (section 14).
 
 ## Non-goals (for now)
 
 - A shared, mutable `Model` across several instances. Stateful apps run on one instance.
-- Database storage plugins and lazy per-record migration. Storage is a plugin (section 9), so these
-  can be added later without changing the design.
+- Lazy per-record migration, and database storage beyond the bundled SQLite plugin (section 9).
+  Storage is a plugin, so these can be added later without changing the design.
 - Reverse migrations and bidirectional lenses.
 - User-defined generics.
 
@@ -241,9 +246,11 @@ app api = {
 - Because each route has visible request and response types, the runtime can check requests, the
   API can be versioned per route (section 6), and an OpenAPI description can be generated
   (section 8).
-- A **stateless** app omits `init`, `model` and `onMsg`: routes return `Reply(Response(Out))` or
-  `Await(cmd, result => ...)`. Stateless apps are the first target, because they scale across
-  instances without shared state.
+- A **stateless** app omits `init`, `model` and `onMsg`: routes return
+  `Reply({ response: Response(Out), cmds: List(Cmd) })` or `Await(cmd, result => ...)`. They can
+  still issue commands, such as publishing an event (section 13), whose results nothing waits for
+  unless awaited. Stateless apps are the first target, because they scale across instances without
+  shared state.
 
 Why `Await` rather than replying from `onMsg`: having `onMsg` send a delayed response would split
 one endpoint across several functions, and the checker could no longer tie a response type to the
@@ -752,6 +759,27 @@ interface CairnPlugin {
 }
 ```
 
+### Bundled plugins
+
+Cairn ships a few first-party plugins, so common needs work out of the box. They use the same
+public interface as any third-party plugin, are pinned by package hash like any other, and are
+swappable through logical resources: code says `@store("orders")`, and the deployment config maps
+it to SQLite on a laptop and to another database plugin in production, with the same hash in both.
+
+For backends to be swappable, Cairn code contains **no SQL strings**. It uses typed operations
+(get, put, scan, filter by fields, and the keyed projections of section 13) that each plugin
+translates for its backend. That also keeps queries type-checked and within the solver's reach.
+
+| Plugin | Role | Notes |
+|---|---|---|
+| `sqlite` | default persistent storage, for `Model`s and projections | embedded, no setup; fits an instance being its own repository (section 14). Node has a built-in `node:sqlite` module (its status on Node 26 to be confirmed). Cairn migrations transform data; the plugin changes the schema, inside the transactional switch. |
+| event-log storage | where topics live (section 13) | an in-memory buffer, an append-only file, SQLite, and later a connector to a real Kafka cluster |
+| key-value with expiry | sessions, rate limits | only if a real need appears |
+
+Redis as such is mostly unnecessary: caching of pure computations comes from hashing (and HTTP
+`ETag`s for stateless routes), in-memory state is the `Model` or a projection, and publish/subscribe
+is covered by WebSockets and the event log.
+
 ### Trust and identity
 
 Plugins are TypeScript, not Cairn, so they are not sandboxed: they are **trusted host code**, like
@@ -1019,6 +1047,182 @@ presented leaves first, each read after what it relies on.
 Whether a change is the right thing to build, whether its names and design make sense, and anything
 inside plugin TypeScript stay human judgment. The aim is to spend review time only on those.
 
+## 13. Event log and projections
+
+### Core concept, plugin storage
+
+The event log is a **core concept**; where events live is a **plugin**. The test for the split: if
+the deploy gate has to reason about it, it is core; if it is about where bytes go, it is a plugin.
+
+The core owns:
+
+- **typed topics**, with every event checked against the topic's type,
+- **projections**: state as a pure, total fold over events,
+- **event-type migrations** when a deploy changes a topic's type, with the same rule as `Model` and
+  `Msg` (old <: new, or a migration; event-sourcing systems call these "upcasters"),
+- **rebuilding projections on deploy**, rollback rules, effects on computed versions (an event type
+  change moves the state counter), and pruning old events into snapshots.
+
+Plugins provide storage and transport: an in-memory buffer, an append-only file, SQLite, a Kafka
+cluster; sync between repositories (section 14); connectors that bring external topics in.
+
+### Writing events and folding them
+
+```
+type OrderEvent = Placed({ id: string, total: decimal }) | Cancelled({ id: string })
+
+@topic("orders", durable) type Orders = OrderEvent
+
+// publishing is a command, so routes stay pure
+@http("POST /orders") def placeOrder(req: { body: { id: string, total: decimal } }) =
+  Reply({ response: { status: 202, body: {} }, cmds: [publish("orders", Placed(req.body))] })
+
+// projections: any number of folds over one topic, each stored where it suits
+@project("orders", store: "dashboard")      // in memory
+def totals(state: Totals, e: OrderEvent): Totals = ...
+
+@project("orders", store: "orderdb", key: e => e.id)   // a SQL table, one row per order
+def orderRow(row: OrderRow, e: OrderEvent): OrderRow = ...
+
+// reacting to events is an entry point, like an HTTP request
+@consume("orders") def onOrder(e: OrderEvent) = ...
+```
+
+- **Keyed projections are the main form.** Folding into one value per event suits totals, not "all
+  orders". A keyed projection folds per key (here, per order), so each event updates one entry and
+  the SQL plugin turns a fold step into a single-row upsert rather than a rewrite.
+- **A projection's identity is (fold hash, topic, position).** When a deploy changes a fold, the new
+  projection is **rebuilt from the events in the background** while the old one keeps serving; the
+  switch happens when it has caught up. Read models therefore deploy instantly without a state
+  migration. Because folds are pure and total (no `partial`; floats summed only in order, section
+  1), every instance builds exactly the same state from the same events.
+- **Consumers across deploys** follow the WebSocket rule: unchanged event types continue on the new
+  code; changed types are migrated, or the consumer stops and restarts.
+- **Rollback** can rebuild projections with the old folds from the same events, as long as the old
+  code can read every event written since: the subtype-or-value check of section 5.
+- **Replay before deploy** is trivial: the log is the recording. The candidate's folds run over real
+  events, and the resulting states are compared with live's.
+- **Tests** use the in-memory plugin: event-driven code is tested as pure folds over a list of events,
+  with no broker running, and results are cached like every other test.
+
+### The storage interface and its guarantees
+
+```ts
+interface LogStorage {
+  append(topic: string, events: Value[]): Promise<number>;            // the new end position
+  read(topic: string, from: number, max: number): Promise<Value[]>;   // in order, from a position
+  commit(position: number, state: Value): Promise<void>;              // position and state, together
+  snapshot?(topic: string, at: number, state: Value): Promise<void>;  // for pruning
+}
+```
+
+Every implementation must give three guarantees, so code behaves the same whichever is plugged in:
+
+1. **Order:** within a topic, every reader sees events in the order they were appended.
+2. **Immutability:** an appended event never changes.
+3. **Atomic progress:** a consumer's or projection's position is saved together with the state
+   derived from it, so after a crash processing resumes exactly where the saved state ends. This is
+   what makes exactly-once processing possible.
+
+Durability may differ, and is declared:
+
+| Plugin | Durability |
+|---|---|
+| in-memory buffer | lost on restart: tests, demos, local development |
+| append-only file | survives restarts, one machine |
+| SQLite | survives restarts, transactional, one machine |
+| Kafka | replicated across machines |
+
+A topic marked `durable` cannot be mapped to the in-memory plugin in a production configuration;
+the gate checks this like any unmapped logical resource.
+
+### Eventual consistency, made explicit
+
+Projections lag slightly behind their log, so reads can be stale. That is visible rather than
+hidden: every projection read is "as of position N", and a route that publishes an event and then
+needs to read its own write can wait until the projection reaches that position, the way `Await`
+waits for a command.
+
+### Across instances: the laws decide convergence
+
+If each instance has its own log and they exchange events, instances receive events in different
+orders. They are guaranteed to reach the same state only if the fold gives the same result in any
+order, which is exactly what declared algebraic laws check (section 11: commutative, idempotent
+merges, the CRDT condition):
+
+- folds **proved order-independent** converge across instances with no coordination;
+- **order-dependent** folds need a single ordered log (one writer per partition). The checker says
+  which case each fold is.
+
+The solver can go further. Some invariants, such as "stock never goes negative", cannot be kept by
+instances that merge independently, because two of them can each sell the last item. Whether an
+invariant survives merging (*invariant confluence*, in the research literature) can be checked, so
+Cairn can say exactly which operations need coordination and which can stay eventually consistent.
+
+### One mechanism for several logs (optional)
+
+Cairn already keeps several ordered logs built separately: the deploy history, migration logs, the
+request log for replay, and the queue of `Msg` results. With a core log, they can share one
+mechanism, with the same pruning, snapshots and sync. A plain `Model` is also expressible as a log
+whose only event is "replace the state", folded by keeping the last value: simple apps keep writing
+`model: { ...model, visits: model.visits + 1 }`, and apps that need history, audit, replay or merging
+use real events, on one set of rules for migration, rollback and pruning.
+
+### Limits
+
+- Ordering across topics and machines (partitions, consumer groups, delivery guarantees) is the hard
+  part of real Kafka. The first version is a single-node, append-only log per instance; distribution
+  comes through repository sync and the Kafka connector.
+- Replaying everything gets slow as logs grow, so snapshots (section 10) are needed early.
+- The log semantics are harder to change later in the core than in a plugin, so they need care up
+  front.
+
+## 14. Instances as repositories
+
+Each running instance is its own repository, like a Git repository: Cairn already has Git's shape, a
+content-addressed store plus a few mutable pointers.
+
+| Git | Cairn instance |
+|---|---|
+| objects | definitions (and events), by hash |
+| branches and refs | namespaces: `dev`, `live`, deploy history |
+| `fetch` / `pull` | copy the hashes you lack, then move a pointer |
+| `push` | send missing hashes, then compare-and-swap the remote's `live` |
+| `fork` | copy the pointers; code is shared by hash |
+
+This makes staging a fork of production and promotion a push of the exact tested hash (identical in
+behaviour, thanks to logical resources); gives per-customer or per-region forks that share all
+unchanged code; lets edge or offline instances sync when they can; and makes merges far easier than
+in Git, because they happen per definition (name to hash), not per line: reformatting and renames
+never conflict, and a conflict means both sides changed the same name to different code.
+
+Decisions to settle:
+
+1. **Code moves easily, state does not.** A fork copies code; state (a `Model`, projections, events)
+   is copied only on request, as a snapshot, since it may be private. Merging state between forks is
+   safe only for state that merges by proved laws (section 13).
+2. **Facts travel with code, with trust.** Test results, proofs, coverage, mutation verdicts and
+   approvals are facts about hashes and can come along with a pull. Deterministic facts (tests,
+   proofs) are cheap for the receiver to recheck; approvals are statements by a person and must be
+   **signed** to mean anything across repositories.
+3. **Migration logs are ordered**, so two forks that both add migrations need an explicit merge
+   migration when merged; the one place merging is as hard as in Git.
+4. **Atomic deployment across repositories** is a distributed transaction, the two-phase deploy of
+   section 3 extended to many repositories: prepare (each fetches the code, runs its gate, prepares
+   any migration), then commit (all swap `live`) or abort. The coordinator must record its decision
+   durably before committing, so participants are not left waiting if it fails. Cairn can make this
+   rarely necessary: when service A calls service B's routes, the gate checks A's expectations
+   against B's types across repositories, and computed versions say whether a change is breaking.
+   Compatible changes deploy to each repository independently; only breaking changes need an atomic
+   multi-repository deploy. Requests carry the namespace they started on, so none mixes versions
+   mid-rollout.
+5. **Identity and permissions:** who may push to whose `live`, with protected pointers and signed
+   updates, as with protected branches.
+
+Suggested stages: code push, pull and fork; facts that travel (rechecked or signed); type checking of
+calls across repositories; atomic deployment across repositories; forking and merging state, limited
+to state that merges by proved laws.
+
 ## Implementation order
 
 **Prototype status.** Steps 2 and 3 exist in a first form. Defs are bound with
@@ -1053,7 +1257,8 @@ split, and compare-and-swap between concurrent deployers.
 5. Stateful apps: `init` and `Model` on a single instance, the one-at-a-time request queue, the
    migration requirement for `Model`, totality checks, the migration log, the transactional switch
    and two-phase deploy, `fix` declarations and required migration tests. Storage through the
-   storage plugin interface, starting with in-memory and file storage.
+   storage plugin interface, starting with in-memory and file storage, then the bundled SQLite
+   plugin with typed operations.
 6. The rollback rule (including returning migration logs to pending) and the state counter.
 7. Commands, `Await` and `onMsg`, with `Msg` migrations, commands tagged by deploy, command
    lifetimes, and the 503 rule for continuations waiting across a state change.
@@ -1070,13 +1275,21 @@ split, and compare-and-swap between concurrent deployers.
 12. Review: approvals cached by hash with inheritance for rehashed-only definitions and
     `cairn review`; behaviour diffs from test examples and replay, later from generated inputs; the
     risk-ordered queue and opt-in auto-approval.
+13. Event log: typed topics, `publish`, `@consume`, keyed projections rebuilt on deploy, the
+    `LogStorage` interface with in-memory, file and SQLite plugins, positions and read-your-writes;
+    then convergence checks from algebraic laws and invariant confluence.
+14. Instances as repositories: push, pull and fork of code; facts that travel; type checking of
+    calls across repositories; atomic deployment across repositories; forking and merging state.
 
 ## Open questions
 
-- **Stateful apps across instances.** Where does a stateful app's model live once it outgrows one
-  instance, and how does the transactional switch work there? One direction: a `Model` whose
-  updates merge by an operation with proved commutative, associative and idempotent laws (section
-  11, "Algebraic laws") can be updated on each instance and merged later, CRDT-style.
+- **Stateful apps across instances.** The event log (section 13) gives a direction: state as
+  projections of logs that instances exchange, converging without coordination when folds are
+  proved order-independent, and with a single ordered log otherwise. Still open: partitioning a
+  single ordered log across machines, and how the transactional switch spans instances that share
+  one.
+- **Plain `Model` as a log.** Should every `Model` become a log of "replace" events (section 13), so
+  there is one state mechanism, or should the plain `Model` stay separate for simplicity?
 - **The first version.** Does the first deploy of an app start at `1.0.0` or `0.1.0`, and do
   `0.x` versions relax the rules as in semver?
 - **Binding syntax.** Annotations on each definition (`@http("POST /quote") def quote ...`, as in
