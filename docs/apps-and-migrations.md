@@ -21,11 +21,15 @@ Prior art worth reading alongside: [Elm](https://elm-lang.org) (the app architec
   halfway.
 - Let the language **decide when a rollback is safe**, instead of forbidding or always allowing it.
 - **Compute version numbers** from what actually changed.
+- Keep everything that touches the outside world (HTTP, WebSockets, files, databases) in
+  **plugins**, so new kinds of entry point and storage can be added without changing the language.
+- **Prune** what old versions leave behind, so history does not grow forever.
 
 ## Non-goals (for now)
 
 - A shared, mutable `Model` across several instances. Stateful apps run on one instance.
-- Persistent storage, databases and lazy per-record migration.
+- Database storage plugins and lazy per-record migration. Storage is a plugin (section 9), so these
+  can be added later without changing the design.
 - Reverse migrations and bidirectional lenses.
 - User-defined generics.
 
@@ -110,7 +114,9 @@ The app architecture depends on features Cairn does not have yet.
 ## 2. Apps
 
 An app is a new kind of declaration, alongside `def` and `test`. It declares its routes, each
-with its own request and response types:
+with its own request and response types. (HTTP routes are provided by the `http` plugin, see
+section 9; whether bindings are grouped in an `app` block as below or written as annotations on
+each definition is an open question.)
 
 ```
 type Model = { visits: number }
@@ -188,7 +194,9 @@ route that owes it. With `Await` the whole endpoint is one expression with one r
 
 ## 3. Serving and instant deploys across instances
 
-`cairn serve --port N` starts an instance that serves the apps in `live`.
+`cairn serve --port N` starts an instance that serves the apps in `live`. In plugin terms
+(section 9), this is the `http` entry-point plugin; the mechanics below apply to every
+entry-point plugin.
 
 The current single `state.json` (read and rewritten whole by every command) is split along the
 line the design already draws:
@@ -480,9 +488,12 @@ change often leaves the `Model` untouched.
 
 Routes and `onMsg` return a list of commands (`Cmd`). The runtime performs them after the new
 model is stored and delivers each result to `onMsg` as a `Msg`. A command used in `Await` instead
-delivers its result to the waiting continuation. The first command is an outgoing HTTP request;
-storage comes later. Command results are where messages from an old version can outlive a deploy,
-which is why section 4 covers late `Msg` results and waiting continuations.
+delivers its result to the waiting continuation. Commands are provided by plugins (section 9): the
+first is an outgoing HTTP request. Every command has a **maximum lifetime**, set by its plugin (an
+HTTP call times out, for example); after it, the command's result can no longer arrive. Command
+results are where messages from an old version can outlive a deploy, which is why section 4 covers
+late `Msg` results and waiting continuations, and the lifetimes are what make pruning them safe
+(section 10).
 
 ## 8. Cheap additions
 
@@ -510,32 +521,206 @@ These fall out of the design with little extra work:
 - **Canary deploys.** Send a percentage of requests to the new namespace: two pointers and a
   weighted choice. For stateful apps this has the same restriction as several majors.
 
+## 9. Plugins
+
+The language stays small and pure. Everything that touches the outside world is a **plugin**:
+trusted host code (TypeScript, the runtime's language) that connects Cairn values and functions to
+one kind of place. Darklang's built-in handlers (HTTP, cron, worker) and datastores are the closest
+precedent; here they are pluggable, so new ones can be added without changing the language.
+
+### Two kinds of plugin
+
+- **Entry points** bring events in: HTTP, WebSockets, cron, queue consumers, a CLI. The plugin
+  listens, turns each event into a call of a Cairn function with a typed input, and maps the typed
+  result back out. The prototype's `serve.ts` is this, hard-coded for HTTP.
+- **Effects and storage** take things out: outgoing HTTP calls, files, databases, and where a
+  stateful app's `Model` lives (in memory, a JSON file, a SQL table). These plugins perform the
+  commands Cairn code returns, and keep state.
+
+### Plugins decide how types map
+
+Cairn types are structural data: the checker holds `{ id: string, qty: number }` as a plain value.
+A plugin receives the declared type and decides what it means in its world:
+
+| Plugin | `{ id: string, qty: number }` becomes |
+|---|---|
+| `http` | a JSON body, checked on the way in and projected on the way out, plus an OpenAPI schema |
+| `sql` storage | a table `(id TEXT PRIMARY KEY, qty REAL)`, plus the `ALTER TABLE` when the type changes |
+| `file` storage | a JSON file, written atomically |
+| `ws` | a typed message format on a channel |
+
+A plugin can **reject types it cannot handle at `update` time**: a SQL plugin may refuse nested
+records it has no mapping for. The error appears before anything is staged, like a type error,
+never at runtime in production.
+
+### Bindings
+
+A binding attaches a definition to a plugin. One syntax serves every plugin, and each plugin parses
+its own arguments:
+
+```
+@http("POST /quote")
+def quote(req: { body: { qty: number, price: number } }): { total: number } = ...
+
+@ws("/chat")
+def chat(msg: ChatMsg, conn: Conn): List(ChatMsg) = ...
+
+@cron("*/5 * * * *")
+def cleanup(now: number): List(Cmd) = ...
+
+@store(sqlite("visits.db"))
+type Model = { visits: number }
+```
+
+The binding, its arguments and the plugin's version are hashed with the definition, as the
+prototype's `route` method and path are now, so changing a binding changes the hash.
+
+### How plugins fit the rest of the design
+
+- **Plugin versions are pinned like builtins.** A plugin's mapping is observable behaviour (how a
+  number is encoded, how a type becomes a table), so a binding records `http@2` in its hash, and
+  moving to `http@3` goes through `cairn upgrade`, exactly like `round2@1 → 2`.
+- **Tests stay pure.** Plugins only act at the edges: tests call bound functions directly, and
+  effect plugins provide fakes for their commands.
+- **Storage plugins take part in the transactional switch.** The two-phase deploy (section 3)
+  becomes part of the storage interface: prepare, commit, abort. A SQL plugin implements it with a
+  database transaction, a file plugin with write-then-rename. A Cairn migration transforms the
+  data; the plugin changes the storage (`ALTER TABLE`).
+- **Long-lived connections follow the `Await` rule.** A WebSocket open across a deploy carries on
+  if its message types did not change; if they did, the plugin closes it with a "reconnect" code,
+  for the same reason requests waiting in an `Await` get a 503.
+- **Replay and time travel work for every plugin**, because the interface requires each plugin to
+  record what comes in (events) and what comes back (command results).
+- **Commands have lifetimes.** Each command a plugin offers declares its maximum lifetime, which
+  makes automatic pruning safe (section 10).
+
+### Interface sketch
+
+```ts
+interface CairnPlugin {
+  name: string;
+  version: number;
+
+  // at update time
+  checkBinding?(decl: Decl, args: Value[]): CairnError[];   // e.g. path params match, types supported
+  mapType?(t: Type): Codec | CairnError;                     // how values cross the boundary
+
+  // entry points
+  start?(rt: Runtime): void;            // listen; call rt.invoke(name, input, onResult)
+  onLive?(ns: Namespace): void;         // a deploy happened
+
+  // effects
+  commands?: Record<string, { run(input: Value): Promise<Value>; maxLifetimeMs: number }>;
+  fakes?: Record<string, (input: Value) => Value>;          // for tests
+
+  // storage and the transactional switch
+  prepare?(migrate: (old: Value) => Value): Promise<Prepared>;
+  commit?(p: Prepared): Promise<void>;
+  abort?(p: Prepared): Promise<void>;
+  snapshot?(): Promise<Value>;          // state at a pruning horizon (section 10)
+}
+```
+
+### Trust
+
+Plugins are TypeScript, not Cairn, so they are neither content-addressed nor sandboxed: they are
+**trusted host code**, like Elm's kernel modules. Their identity is still `name@version`, ideally
+pinned by a hash of the package, so a deploy remains fully determined by hashes.
+
+## 10. Pruning
+
+Several parts of the design keep old versions alive, and without pruning they grow forever:
+migration logs in the deploy history (for lagging instances, late command results and rollbacks),
+old `Msg` migrations, rollback targets back to the first deploy, old major versions served side by
+side, and every code-store entry any of these still refers to.
+
+### The support horizon
+
+Pruning sets a **horizon**: a deploy before which the system stops promising anything. With the
+horizon at `v2.3.0+s4`:
+
+| Before the horizon | After pruning |
+|---|---|
+| Rollback | cannot cross the horizon |
+| Late command results issued earlier | dropped and logged, or delivered as a typed `Expired`, so code can handle them |
+| Instances that far behind | cannot replay logs; they load a **snapshot** of the state at the horizon |
+| Migration logs and old `Msg` migrations | deleted |
+| Older majors | retired; clients still pinned to them get `410 Gone` |
+| Code only those things used | garbage-collected from the store |
+
+The snapshot is the same idea as **squashing migrations** in database tools (Django's
+`squashmigrations`, Rails' `schema.rb`): the state at the horizon becomes the new starting point,
+and the history before it is dropped. Storage plugins produce it (`snapshot` in section 9).
+
+Once no message older than the horizon can arrive, the migrations that converted old `Msg`
+variants are no longer needed, so pruning is also how old variants stop being supported.
+
+Because the state counter already marks one-way steps, a horizon is a minimum counter: "supported
+states `s4`–`s7`".
+
+### Automatic and explicit pruning
+
+**Automatic**, for what is provably no longer needed. Nothing is lost, so the runtime does it
+without asking:
+
+- `Msg` migrations older than the longest command lifetime (section 7): no result can still arrive
+  that needs them.
+- Migration logs that every instance has already applied.
+
+**Explicit**, for anything that changes a guarantee. A person decides, with `cairn prune --before
+<version>` or a policy such as "keep the last 20 deploys or 30 days":
+
+- moving the rollback horizon,
+- retiring an old major,
+- dropping time-travel history.
+
+### The gate checks pruning
+
+Pruning changes what is supported, so it gets the same preview as a deploy:
+
+```
+cairn prune --before v2.3.0+s4 --dry-run
+  rollback: limited to v2.3.0+s4 and later (was: back to v1.0.0+s1)
+  late results: 2 pending commands were issued before the horizon and will be dropped
+  majors: v1 retired — 0 calls in the last 30 days
+  store: 1,204 entries become unreachable and will be collected
+```
+
+A prune past `live` is refused. Retiring a major that still receives traffic, or dropping pending
+command results, needs `--force`.
+
 ## Implementation order
 
-**Prototype status.** A first slice of step 2 exists: `route "METHOD /path" name(req: In): Out`
+**Prototype status.** A first slice of steps 2 and 3 exists: `route "METHOD /path" name(req: In): Out`
 declarations (a `def` with a method and path, both hashed), `cairn serve`, request checking,
 response projection, the `X-Cairn-Namespace` header and per-request budgets. Instances follow a
 shared state file saved by atomic rename, so one deploy switches every instance in milliseconds
-(`examples/serve-demo.sh`). It differs from the design in that routes are separate declarations
-rather than members of an `app`, there is no `Reply`/`Await` yet, the store is not split, and
-there is no compare-and-swap between concurrent deployers.
+(`examples/serve-demo.sh`). It differs from the design in that HTTP is built in rather than a
+plugin, routes use a `route` keyword rather than a binding, there is no `Reply`/`Await` yet, the
+store is not split, and there is no compare-and-swap between concurrent deployers.
 
 1. Tagged unions with `case`, lists and the built-in parameterized types, type aliases (including
    recursive types), and the number rules (division returning `Result` unless the divisor is a
    non-zero literal or `NonZero`; overflow as an error).
-2. Stateless `app` declarations with typed routes (path parameters, query, body), `cairn serve`,
+2. Stateless HTTP routes with typed requests (path parameters, query, body), `cairn serve`,
    request checking and response projection, per-request evaluation budgets, the
    `X-Cairn-Namespace` header; the store split; instant deploys across several local instances.
-3. Computed API versions, and `cairn deploy --dry-run`.
-4. Stateful apps: `init` and `Model` on a single instance, the one-at-a-time request queue, the
+3. The plugin interface: bindings, type mapping and update-time checks, plugin versions pinned like
+   builtins. HTTP becomes the first entry-point plugin; a WebSocket plugin shows the interface
+   generalizes.
+4. Computed API versions, and `cairn deploy --dry-run`.
+5. Stateful apps: `init` and `Model` on a single instance, the one-at-a-time request queue, the
    migration requirement for `Model`, totality checks, the migration log, the transactional switch
-   and two-phase deploy, `fix` declarations and required migration tests.
-5. The rollback rule (including returning migration logs to pending) and the state counter.
-6. Commands, `Await` and `onMsg`, with `Msg` migrations, commands tagged by deploy, and the 503
-   rule for continuations waiting across a state change.
-7. Replay against recorded requests; OpenAPI generation; HTTP caching.
-8. Several major versions and canaries, for stateless apps and for stateful apps whose versions
-   share the same `Model` type.
+   and two-phase deploy, `fix` declarations and required migration tests. Storage through the
+   storage plugin interface, starting with in-memory and file storage.
+6. The rollback rule (including returning migration logs to pending) and the state counter.
+7. Commands, `Await` and `onMsg`, with `Msg` migrations, commands tagged by deploy, command
+   lifetimes, and the 503 rule for continuations waiting across a state change.
+8. Pruning: automatic pruning of what is provably unneeded, `cairn prune` with its preview,
+   snapshots, and garbage collection of the store.
+9. Replay against recorded requests; OpenAPI generation; HTTP caching.
+10. Several major versions and canaries, for stateless apps and for stateful apps whose versions
+    share the same `Model` type.
 
 ## Open questions
 
@@ -543,3 +728,11 @@ there is no compare-and-swap between concurrent deployers.
   instance, and how does the transactional switch work there?
 - **The first version.** Does the first deploy of an app start at `1.0.0` or `0.1.0`, and do
   `0.x` versions relax the rules as in semver?
+- **Binding syntax.** Annotations on each definition (`@http("POST /quote") def quote ...`, as in
+  section 9), or bindings grouped in an `app` block (as in section 2)? Annotations keep one syntax
+  for every plugin; an `app` block keeps an app's model and its routes together.
+- **Plugin trust and distribution.** Plugins are trusted host code for now. How are they packaged
+  and pinned, and is sandboxing (for example, running plugins in a separate process with only the
+  capabilities they declare) worth it later?
+- **Expired results.** Should a command result that arrives after its horizon be dropped silently
+  (and logged), or delivered as a typed `Expired` value that code must handle?
