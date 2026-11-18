@@ -91,6 +91,8 @@ examples/       v1 … v7 scenario files + demo.sh
 
 ## Natural next steps
 
+A proposal for apps served over HTTP, state migrations, safe rollback and computed versions is in [`docs/apps-and-migrations.md`](docs/apps-and-migrations.md).
+
 1. **Row polymorphism** (`{ name: string | r }`) for HM-style inference over records.
 2. **Algebraic effects with handlers**, so IO, mutable signals and `Remote` show up in types and tests run under fake handlers.
 3. **Shadow deploys**: run the candidate hash alongside live on real inputs and diff the outputs. Purity makes this safe.
