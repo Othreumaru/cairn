@@ -1,15 +1,18 @@
-import { CairnError, Decl, Type } from "./ast.js";
-import { BUILTINS, currentVersion } from "./builtins.js";
-import { Checker } from "./check.js";
-import { builtinsUsed, canon, denormalize, Entry, hashDecls, normalize, sha, short } from "./hash.js";
-import { parseProgram } from "./parser.js";
-import { showDecl, showType } from "./pretty.js";
-import { subtype, typeEq } from "./types.js";
+import { CairnError, type Decl, type Type } from "./ast.ts";
+import { BUILTINS, currentVersion } from "./builtins.ts";
+import { Checker } from "./check.ts";
+import { builtinsUsed, canon, denormalize, type Entry, hashDecls, normalize, sha, short } from "./hash.ts";
+import { parseProgram } from "./parser.ts";
+import { PLUGINS } from "./plugins/index.ts";
+import type { Bound } from "./plugins/types.ts";
+import { showDecl, showType } from "./pretty.ts";
+import { subtype, typeEq } from "./types.ts";
 
 /** name -> hash. A namespace is just a pointer table; code itself is immutable. */
 export type Namespace = Record<string, string>;
 
-export type TestResult = { passed: boolean; detail: string; ms: number };
+/** `covers`: the coverage units (see coverage.ts) the test reached, as permanent as its result. */
+export type TestResult = { passed: boolean; detail: string; ms: number; covers?: string[] };
 
 export type State = {
   entries: Record<string, Entry>; // append-only store, keyed by hash
@@ -17,6 +20,7 @@ export type State = {
   live: Namespace | null; // what the runtime serves; only `deploy` writes here
   history: { id: string; ns: Namespace; at: string }[];
   testCache: Record<string, TestResult>; // a test result is a permanent fact about a hash
+  mutationCache?: Record<string, boolean>; // "mutant:test" -> does the test fail on the mutant (see mutation.ts)
 };
 
 export const emptyState = (): State => ({ entries: {}, dev: {}, live: null, history: [], testCache: {} });
@@ -85,6 +89,15 @@ function builtinChanges(before: Entry, after: Entry): string[] {
     .sort();
 }
 
+/** Defs in `ns` bound to `plugin`, in name order. */
+export function boundIn(state: State, ns: Namespace, plugin: string): Bound[] {
+  return Object.keys(ns)
+    .sort()
+    .map((name) => ({ name, entry: state.entries[ns[name]] }))
+    .filter(({ entry }) => entry.binding?.plugin === plugin && entry.sig.k === "fn")
+    .map(({ name, entry }) => ({ name, hash: entry.hash, sig: entry.sig as Bound["sig"], args: entry.binding!.args }));
+}
+
 // ---------------------------------------------------------------------------
 // The update pipeline: parse -> check -> hash -> find dependents -> re-check -> report
 
@@ -137,6 +150,22 @@ function updateDecls(state: State, decls: Decl[], opts: { dryRun?: boolean }): U
     seen.add(d.name);
   }
 
+  // Bindings written in this file are checked by their plugin and pinned to its current version.
+  // Bindings of stored defs keep the version they were hashed with, like builtins.
+  decls = decls.map((d) => {
+    if (!d.binding || d.binding.version !== undefined) return d;
+    const plugin = PLUGINS[d.binding.plugin];
+    if (!plugin) throw new CairnError(`unknown plugin '@${d.binding.plugin}' (known: ${Object.keys(PLUGINS).map((p) => "@" + p).join(", ")})`, d.span);
+    if (d.sig.k !== "fn") throw new CairnError(`@${d.binding.plugin}(...) can only bind a function`, d.span);
+    try {
+      plugin.checkBinding(d.binding.args, d.sig, d.name);
+    } catch (e) {
+      if (e instanceof CairnError && !e.span) throw new CairnError(e.message, d.span);
+      throw e;
+    }
+    return { ...d, binding: { ...d.binding, version: plugin.version } };
+  });
+
   const dev = state.dev;
   const fileNames = new Set(decls.map((d) => d.name));
 
@@ -175,7 +204,7 @@ function updateDecls(state: State, decls: Decl[], opts: { dryRun?: boolean }): U
 
   // A file decl whose hash changed may be *textually* identical — it just depends on something
   // else in the file that changed. Distinguish "edited" from "rehashed because a dependency moved".
-  const nameLevelKey = (d: Decl) => canon({ kind: d.kind, sig: d.sig, body: normalize(d.body, (n) => ({ t: "var", name: `@${n}` })) });
+  const nameLevelKey = (d: Decl) => canon({ kind: d.kind, sig: d.sig, binding: d.binding, body: normalize(d.body, (n) => ({ t: "var", name: `@${n}` })) });
   const edited = new Set(
     modifiedExisting.filter((n) => nameLevelKey(decls.find((d) => d.name === n)!) !== nameLevelKey(denormalize(state.entries[dev[n]], (h) => names.get(h)))),
   );
@@ -250,11 +279,36 @@ function updateDecls(state: State, decls: Decl[], opts: { dryRun?: boolean }): U
   }
 
   for (const c of report.changes) if (c.newHash && c.newHash !== c.oldHash && state.entries[c.newHash]) c.known = true;
+
+  // Recursion is only allowed in `partial def`, and total code may not call partial code, so the
+  // marker appears everywhere a risk of not terminating reaches. Tests are exempt: they always run
+  // under the evaluation budget, and nothing is built on them.
+  if (hashed) {
+    const newByHash = new Map([...hashed.values()].map((e) => [e.hash, e]));
+    const nameOf = new Map([...names, ...[...hashed].map(([n, e]) => [e.hash, n] as const)]);
+    const entryOf = (h: string) => newByHash.get(h) ?? state.entries[h];
+    for (const [name, e] of hashed) {
+      if (e.kind === "test" || e.partial) continue;
+      const fix = `declare it 'partial def ${name}'`;
+      if (e.group) {
+        const peers = e.group.members.filter((h) => h !== e.hash).map((h) => `'${nameOf.get(h)}'`);
+        const why = peers.length ? `is mutually recursive with ${peers.join(", ")}` : "calls itself";
+        report.fileErrors.push({ name, error: `'${name}' ${why}, so it may not terminate: ${fix}` });
+        continue;
+      }
+      const partialDeps = e.deps.filter((h) => entryOf(h)?.partial).map((h) => `'${nameOf.get(h) ?? short(h)}'`);
+      if (partialDeps.length)
+        report.fileErrors.push({ name, error: `'${name}' calls partial ${partialDeps.join(", ")}, and total code may not call partial code: ${fix}` });
+    }
+    if (report.fileErrors.length) report.ok = false;
+  }
   if (!report.ok || !hashed) return report;
 
   // --- Commit: new entries are appended; the dev namespace pointers move.
   const nextDev: Namespace = { ...dev };
   for (const [name, entry] of hashed) nextDev[name] = entry.hash;
+  const withNew: State = { ...state, entries: { ...state.entries, ...Object.fromEntries([...hashed.values()].map((e) => [e.hash, e])) } };
+  for (const plugin of Object.values(PLUGINS)) plugin.checkAll?.(boundIn(withNew, nextDev, plugin.name));
   for (const [name, h] of Object.entries(nextDev)) {
     const entry = hashed.get(name) ?? state.entries[h];
     if (entry.kind !== "test") continue;

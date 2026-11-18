@@ -1,4 +1,5 @@
 #!/usr/bin/env sh
 # Run the Cairn CLI from anywhere; state lives in ./.cairn unless CAIRN_HOME is set.
+# Needs Node 26, which runs the TypeScript sources directly.
 DIR="$(cd "$(dirname "$0")" && pwd)"
-exec "$DIR/node_modules/.bin/tsx" "$DIR/src/cli.ts" "$@"
+exec node "$DIR/src/cli.ts" "$@"

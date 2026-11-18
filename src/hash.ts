@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { CairnError, Decl, DeclKind, Expr, Type } from "./ast.js";
-import { BUILTINS, currentVersion } from "./builtins.js";
+import { type Binding, CairnError, type Decl, type DeclKind, type Expr, type Type } from "./ast.ts";
+import { BUILTINS, currentVersion } from "./builtins.ts";
 
 /**
  * Content addressing.
@@ -26,6 +26,8 @@ export type Entry = {
   deps: string[]; // hashes this entry references (incl. cycle peers)
   localNames: string[]; // original local binder names, in traversal order (metadata, not hashed)
   group?: { hash: string; index: number; members: string[] };
+  binding?: Binding; // plugin, plugin version and arguments; hashed, so rebinding changes the hash
+  partial?: true; // `partial def`; hashed, so marking or unmarking changes the hash
   origName: string; // metadata only
 };
 
@@ -242,6 +244,8 @@ export function denormalize(entry: Entry, nameOf: (hash: string) => string | und
     body: go(entry.body, new Map()),
     span: { line: 0, col: 0 },
     builtins: Object.keys(builtins).length ? builtins : undefined,
+    binding: entry.binding,
+    partial: entry.partial,
   };
 }
 
@@ -318,7 +322,7 @@ export function hashDecls(decls: Decl[], external: (name: string) => string | un
       const d = byName.get(name)!;
       const localNames: string[] = [];
       const body = normalize(d.body, resolveFor(d), new Map(), 0, localNames);
-      return { d, body, localNames, payload: { kind: d.kind, sig: d.sig, body } };
+      return { d, body, localNames, payload: { kind: d.kind, sig: d.sig, body, binding: d.binding, partial: d.partial } };
     });
 
     let hashes: string[];
@@ -348,6 +352,8 @@ export function hashDecls(decls: Decl[], external: (name: string) => string | un
         deps: [...deps].sort(),
         localNames: n.localNames,
         group: isCycle ? { hash: groupHash!, index: i, members: hashes } : undefined,
+        binding: n.d.binding,
+        partial: n.d.partial,
         origName: n.d.name,
       });
     });

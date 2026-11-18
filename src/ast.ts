@@ -49,6 +49,15 @@ export type Expr =
 
 export type DeclKind = "def" | "test";
 
+/** A literal argument to a binding: `@http("POST /quote")`. */
+export type BindingArg = string | number | boolean;
+
+/**
+ * `@plugin(args) def f(...)` attaches a def to a plugin (an HTTP route, a WebSocket path, ...).
+ * The plugin's version is stamped in when the def is staged, and is part of the hash.
+ */
+export type Binding = { plugin: string; version?: number; args: BindingArg[] };
+
 /** A top-level declaration as written in a source file (name-form). */
 export type Decl = {
   kind: DeclKind;
@@ -57,14 +66,16 @@ export type Decl = {
   body: Expr;
   span: Span;
   builtins?: Record<string, number>; // pinned builtin versions (set when rebuilt from the store); absent = current
+  binding?: Binding; // set for `@plugin(...) def`; part of the hash
+  partial?: true; // `partial def`: may recurse, and so may not terminate; part of the hash
 };
 
 export class CairnError extends Error {
-  constructor(
-    message: string,
-    public span?: Span,
-    public node?: Expr,
-  ) {
+  span?: Span;
+  node?: Expr;
+  constructor(message: string, span?: Span, node?: Expr) {
     super(message);
+    this.span = span;
+    this.node = node;
   }
 }

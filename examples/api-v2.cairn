@@ -1,0 +1,14 @@
+// v2: the fee is never less than 1 (the WebSocket's types are unchanged, so open connections
+// stay open and get the new fee), the greeting changes, and a new route reports the version.
+
+def fee(o: { qty: number, price: number }): number = max(subtotal(o) * 0.01, 1)
+
+@http("GET /greet/:name")
+def greet(req: { params: { name: string } }): { message: string } =
+  { message: "hi " ++ req.params.name ++ "!" }
+
+@http("GET /version")
+def version(req: {}): { version: number } = { version: 2 }
+
+test minFeeApplies = quote({ body: { qty: 1, price: 1 } }).fee == 1
+test greets = greet({ params: { name: "ada" } }).message == "hi ada!"

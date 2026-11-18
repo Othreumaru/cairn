@@ -1,4 +1,4 @@
-import { Type } from "./ast.js";
+import { type Type } from "./ast.ts";
 
 /**
  * Structural subtyping over closed, immutable records.

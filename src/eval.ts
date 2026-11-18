@@ -1,6 +1,7 @@
-import { CairnError, Expr } from "./ast.js";
-import { builtin } from "./builtins.js";
-import { Entry, short } from "./hash.js";
+import { CairnError, type Expr } from "./ast.ts";
+import { builtin } from "./builtins.ts";
+import { branchUnit, ifNodes } from "./coverage.ts";
+import { type Entry, short } from "./hash.ts";
 
 /**
  * Interpreter over hash-form code. Every global is fetched by hash, so a running program
@@ -23,11 +24,13 @@ export class Evaluator {
   private cache = new Map<string, Value>();
   private evaluating = new Set<string>();
   fuel: number;
+  private lookup: (hash: string) => Entry | undefined;
+  /** When set, collects the coverage units (see coverage.ts) this evaluation reaches. */
+  cover?: Set<string>;
+  private ifIndex = new Map<string, Map<Expr, number>>();
 
-  constructor(
-    private lookup: (hash: string) => Entry | undefined,
-    fuel = 1_000_000,
-  ) {
+  constructor(lookup: (hash: string) => Entry | undefined, fuel = 1_000_000) {
+    this.lookup = lookup;
     this.fuel = fuel;
   }
 
@@ -40,6 +43,7 @@ export class Evaluator {
     if (this.evaluating.has(hash)) throw new CairnError(`definition ${entry.origName} depends on its own value (not via a function)`);
     this.evaluating.add(hash);
     try {
+      if (entry.body.t !== "lam") this.cover?.add(hash); // a function's body runs when it is applied
       const v = this.eval(entry.body, new Map(), entry);
       this.cache.set(hash, v);
       return v;
@@ -110,8 +114,11 @@ export class Evaluator {
         const v = this.eval(e.e, env, ctx);
         return e.op === "-" ? -(v as number) : !(v as boolean);
       }
-      case "if":
-        return this.eval(e.c, env, ctx) ? this.eval(e.a, env, ctx) : this.eval(e.b, env, ctx);
+      case "if": {
+        const c = this.eval(e.c, env, ctx);
+        if (this.cover && ctx.hash) this.cover.add(branchUnit(ctx.hash, this.ifPosition(ctx, e), c as boolean));
+        return c ? this.eval(e.a, env, ctx) : this.eval(e.b, env, ctx);
+      }
       case "let": {
         const v = this.eval(e.value, env, ctx);
         const inner = new Map(env);
@@ -121,12 +128,20 @@ export class Evaluator {
     }
   }
 
+  /** Position of an `if` node in its entry's body, matching coverage.ts's numbering. */
+  private ifPosition(ctx: Entry, e: Expr): number {
+    let index = this.ifIndex.get(ctx.hash);
+    if (!index) this.ifIndex.set(ctx.hash, (index = new Map(ifNodes(ctx.body).map((n, i) => [n, i]))));
+    return index.get(e)!;
+  }
+
   apply(f: Value, args: Value[]): Value {
     if (--this.fuel < 0) throw new FuelExhausted("evaluation budget exhausted (possible infinite recursion)");
     if (typeof f === "object" && f.tag === "builtin") return builtin(f.name, f.v).impl(...args);
     if (typeof f === "object" && f.tag === "clo") {
       const inner = new Map(f.env);
       f.params.forEach((p, i) => inner.set(p, args[i]));
+      if (f.ctx.hash) this.cover?.add(f.ctx.hash);
       return this.eval(f.body, inner, f.ctx);
     }
     throw new CairnError("internal: calling a non-function");

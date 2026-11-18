@@ -1,5 +1,5 @@
-import { CairnError, Decl, Expr, Param, RecEntry, T, Type } from "./ast.js";
-import { lex, Token } from "./lexer.js";
+import { type BindingArg, CairnError, type Decl, type Expr, type Param, type RecEntry, T, type Type } from "./ast.ts";
+import { lex, type Token } from "./lexer.ts";
 
 // Binary operator precedence (higher binds tighter).
 export const PREC: Record<string, number> = {
@@ -21,7 +21,10 @@ export const PREC: Record<string, number> = {
 
 class Parser {
   private pos = 0;
-  constructor(private toks: Token[]) {}
+  private toks: Token[];
+  constructor(toks: Token[]) {
+    this.toks = toks;
+  }
 
   peek(o = 0): Token {
     return this.toks[Math.min(this.pos + o, this.toks.length - 1)];
@@ -54,6 +57,32 @@ class Parser {
 
   decl(): Decl {
     const start = this.peek();
+    if (this.is("@")) {
+      // @plugin(arg, ...) def f(...): R = body
+      this.next();
+      const plugin = this.ident().text;
+      this.expect("(");
+      const args: BindingArg[] = [];
+      while (!this.is(")")) {
+        const a = this.next();
+        if (a.kind === "str" || a.kind === "num") args.push(a.value!);
+        else if (a.kind === "kw" && (a.text === "true" || a.text === "false")) args.push(a.text === "true");
+        else throw new CairnError(`binding arguments must be literals, not '${a.text}'`, a.span);
+        if (!this.is(",")) break;
+        this.next();
+      }
+      this.expect(")");
+      if (!this.is("def") && !this.is("partial")) throw new CairnError(`@${plugin}(...) must be followed by a def`, this.peek().span);
+      const d = this.decl();
+      if (d.body.t !== "lam") throw new CairnError(`@${plugin}(...) can only bind a function: def ${d.name}(...): ...`, d.span);
+      return { ...d, binding: { plugin, args }, span: start.span };
+    }
+    if (this.is("partial")) {
+      // partial def f(...) = body   — the explicit escape hatch for general recursion
+      this.next();
+      if (!this.is("def")) throw new CairnError(`'partial' must be followed by a def`, this.peek().span);
+      return { ...this.decl(), partial: true, span: start.span };
+    }
     if (this.is("test")) {
       this.next();
       const name = this.ident().text;
@@ -88,12 +117,12 @@ class Parser {
       this.endOfDecl();
       return { kind: "def", name, sig, body, span: start.span };
     }
-    throw new CairnError(`expected 'def' or 'test' but found '${start.text}'`, start.span);
+    throw new CairnError(`expected 'def', 'partial def', 'test' or '@binding' but found '${start.text}'`, start.span);
   }
 
   endOfDecl() {
     const t = this.peek();
-    if (t.kind === "eof" || this.is("def") || this.is("test")) return;
+    if (t.kind === "eof" || this.is("def") || this.is("test") || this.is("partial") || this.is("@")) return;
     throw new CairnError(`unexpected '${t.text}' after end of declaration`, t.span);
   }
 
