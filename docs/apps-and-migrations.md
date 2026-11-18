@@ -76,10 +76,36 @@ The app architecture depends on features Cairn does not have yet.
    (`type Tree = Leaf | Node(Tree, Tree)`) cannot be expanded; they are hashed as a group, the same
    way recursive definitions already are in `hash.ts`.
 
-5. **No operations that produce invalid data.** Number operations currently follow JavaScript, so
-   `1 / 0`, `0 / 0` and overflow (`1e308 * 10`) yield `Infinity` or `NaN`. Either such results
-   become checked errors at the operation that produced them, or the operations return a result
-   type. Either way, well-typed code cannot produce invalid numbers.
+5. **`NaN` and `Infinity` never exist as Cairn values.** Number operations currently follow
+   JavaScript (IEEE 754), so `1 / 0`, `0 / 0` and overflow (`1e308 * 10`) yield `Infinity` or
+   `NaN`. Those values fail silently in exactly the places Cairn relies on: `NaN == NaN` is false,
+   so a test can fail and be cached as a fact about its hash; JSON has no representation for them
+   (`JSON.stringify` turns them into `null`), so a REST response would break its declared type;
+   and they spread through every later computation while still type-checking as `number`.
+
+   The rules:
+
+   - **Division by a non-zero literal** (`x / 100`) returns a plain `number`. The checker can see
+     the divisor is not zero, and this is by far the most common division.
+   - **Division by anything else** returns `Result(DivByZero, number)`. A `Result` is not a
+     number, and `case` is exhaustive, so the checker makes the code decide what a zero means
+     where the division is written:
+
+     ```
+     def avg(total: number, count: number): number =
+       case total / count of
+         Ok(v)  => v
+         Err(_) => 0
+     ```
+
+     Without the `case`, `total / count` is rejected: "expected number, but 'total / count' is
+     Result(DivByZero, number) (count may be 0)". Shorter forms: `withDefault(0, total / count)`;
+     returning the `Result` to the caller; or, in a route, turning `Err` into a 400.
+   - **`nonZero(x)`** returns `Result(IsZero, NonZero)`. Division by a `NonZero` returns a plain
+     `number`, so a value checked once can be divided by freely.
+   - **Overflow** is an error raised at the operation that overflowed, never a value. It is too rare
+     to justify a `Result` on every multiplication. Inside a migration it is caught by the
+     transactional switch (section 4).
 
 ## 2. Apps
 
@@ -204,7 +230,7 @@ Each way a migration could fail is ruled out or made harmless:
 | Failure | Prevention |
 |---|---|
 | Returns the wrong shape | The type checker: the result must be exactly `New`. |
-| Produces invalid data or crashes partway | No operations that produce invalid data (section 1). If invalid numbers become checked errors rather than result types, a migration can still stop on one; the transactional switch then leaves everything unchanged. |
+| Produces invalid data or crashes partway | `NaN` and `Infinity` cannot occur, and division by zero must be handled in the types (section 1). The one remaining runtime error is numeric overflow, which is very rare; if it happens, the transactional switch leaves everything unchanged. |
 | Never finishes | A migration and everything it reaches must be **non-recursive**. Hashing already finds recursion groups, so the check is cheap. Iteration uses total list operations only. |
 | Exceeds memory or time | The **transactional switch** below: if the real run fails, nothing changes. A **dry run** on the live state at `update` time gives early warning, but the state can change before the switch, so the dry run is not the guarantee. |
 | Does the wrong thing | Not decidable. Tests, cached like all others, and replay (section 8). |
@@ -333,7 +359,8 @@ These fall out of the design with little extra work:
 ## Implementation order
 
 1. Tagged unions with `case`, lists and the built-in parameterized types, type aliases (including
-   recursive types), and no operations that produce invalid data.
+   recursive types), and the number rules (division returning `Result` unless the divisor is a
+   non-zero literal or `NonZero`; overflow as an error).
 2. Stateless `app` declarations with typed routes, `cairn serve`, request checking and response
    projection, the `X-Cairn-Namespace` header; the store split; instant deploys across several
    local instances.
@@ -361,7 +388,3 @@ These fall out of the design with little extra work:
   instance, and how does the transactional switch work there?
 - **The first version.** Does the first deploy of an app start at `1.0.0` or `0.1.0`, and do
   `0.x` versions relax the rules as in semver?
-- **Invalid numbers.** Should `1 / 0` be a checked error at the operation, or should division
-  return a `Result`? The first is more convenient; the second makes the possibility visible in
-  types, and is the only one under which a migration provably cannot stop partway (with checked
-  errors it can, and the transactional switch has to absorb it).
