@@ -385,10 +385,13 @@ route that owes it. With `Await` the whole endpoint is one expression with one r
   projected onto their declared types. With width subtyping a value can carry fields its type does
   not mention; projecting means no such hidden field ever survives in the state, and nothing (a
   rollback check, a migration, a later version) can come to depend on one.
-- **Requests to a stateful app are processed one at a time**, like Elm's update loop: a route (or
-  continuation) runs to completion before the next starts, so two requests can never both read
-  and overwrite the same model. Routes are pure and synchronous, so this costs little. Waiting for
-  an `Await`ed command does not hold the queue; only running Cairn code does.
+- **Everything that changes an app's state is processed one step at a time**, like Elm's update
+  loop. A *step* is one run of app code: an HTTP request, a WebSocket message, an event for
+  `@consume`, a `@cron` tick, a command result for `onMsg`, or the continuation of an `Await`. All of
+  them go through the app's one queue, and each runs to completion before the next starts, so two
+  steps can never both read and overwrite the same model. Code is pure and synchronous, so this
+  costs little. Waiting for an `Await`ed command does not hold the queue; only running Cairn code
+  does. Each step commits atomically (section 7).
 - **Each request has an evaluation budget**, using the evaluator's existing fuel limit, because
   routes may recurse. Running out of budget, or a numeric overflow, ends the request with a 500:
   the model is left unchanged and the route's commands are discarded.
@@ -559,7 +562,7 @@ Each way a migration could fail is ruled out or made harmless:
 
 ### The switch is transactional
 
-1. Pause the request queue. Requests run one at a time (section 2), so this only means letting the
+1. Pause the app's queue. Steps run one at a time (section 2), so this only means letting the
    current one finish, which takes microseconds; it is required because a request running on the
    old version would otherwise return an old-type model after the migration. Requests waiting in an
    `Await` are handled as described above.
@@ -707,13 +710,54 @@ change often leaves the `Model` untouched.
 
 ## 7. Commands
 
-Routes and `onMsg` return a list of commands (`Cmd`). The runtime performs them after the new
-model is stored and delivers each result to `onMsg` as a `Msg`. A command used in `Await` instead
+Routes and `onMsg` return a list of commands (`Cmd`). The runtime performs them after the step that
+returned them has committed (below), and delivers each result to `onMsg` as a `Msg`. A command used in `Await` instead
 delivers its result to the waiting continuation. Commands are provided by plugins (section 9): the
 first is an outgoing HTTP request. Every command has a **maximum lifetime**, set by its plugin (an
 HTTP call times out, for example); after it, the command's result can no longer arrive. Command
 results are where messages from an old version can outlive a deploy, which is why section 4 covers
 late `Msg` results and waiting continuations. Lifetimes also bound how long an `Await` can wait.
+
+### Steps, the outbox and crashes
+
+Everything one step changes is committed together, and external effects go out afterwards, safely
+repeatable.
+
+1. **A step commits everything at once.** Its results are written in **one transaction** in the
+   app's store: the new `model`, events published to the app's own topics, consumer positions (when
+   the step came from a topic), and the commands it returned, written to an **outbox** rather than
+   run directly. Either all of it is saved or none of it is; the storage plugin's prepare and commit
+   (section 9) provide the atomicity.
+2. **External effects run after the commit, safely repeatable.** A dispatcher takes commands from
+   the outbox, runs them, and marks each as done. A crash between running and marking can make a
+   command run twice, so:
+   - each command carries an **idempotency key** derived from its step (app, step position, command
+     index). It is deterministic, so a re-run uses the same key and replay can reproduce it;
+   - plugins pass the key on, for example as an `Idempotency-Key` HTTP header;
+   - plugins declare whether the other side honours it, and `cairn risks` lists commands whose target
+     cannot de-duplicate as "may happen twice after a crash".
+3. **Responses are sent only after the commit**, so a client never sees a result a crash then undoes.
+   A crash after the commit but before the response leaves the client with an error and a retry
+   that would run the step again, so the `http` plugin accepts an `Idempotency-Key` header from
+   clients: the response is stored in the step's transaction, and a retry with the same key gets the
+   stored response without running the step again.
+4. **`Await` across a crash.** A waiting continuation is a closure in memory, not durable. After a
+   crash the waiting request is gone (its client sees an error and can retry safely with its key);
+   the command still completes once through the outbox; its late result is logged and discarded,
+   because nothing waits for it. Durable continuations would mean storing closures, and are left
+   out for now.
+
+What Cairn then guarantees after a crash:
+
+| What | Guarantee |
+|---|---|
+| State changes (`model`, own topics, positions) | **exactly once**: committed together or not at all |
+| External effects (commands) | **at least once**, with idempotency keys so that targets which honour them see each once |
+| Responses to clients | **at most once**; retries are safe when clients send an idempotency key |
+
+Stateless apps that issue commands (such as `publish`) also need a small durable outbox per
+instance. With the in-memory plugin a crash loses it, which suits development; the durability check
+of section 13 applies.
 
 ## 8. Cheap additions
 
@@ -751,7 +795,8 @@ These fall out of the design with little extra work:
   prototype.)
 - **A risk report.** Every place Cairn's guarantees stop is explicit: `partial def` (may not
   terminate), plugin bindings (trusted host code), `migration` and `fix` (permanent data changes),
-  properties only checked on samples, survived mutants, coverage gaps, and overrides such as
+  properties only checked on samples, survived mutants, coverage gaps, commands whose target
+  cannot de-duplicate (they may happen twice after a crash, section 7), and overrides such as
   `--force`. Because all of it is structured data about hashes, `cairn risks` can list it for the
   whole codebase or for one deploy, so a reviewer, human or AI, starts where the risk is rather than
   reading every change equally. Reviews can be cached by hash too: "this partial function was
@@ -871,7 +916,11 @@ interface CairnPlugin {
   onLive?(ns: Namespace): void;         // a deploy happened
 
   // effects
-  commands?: Record<string, { run(input: Value): Promise<Value>; maxLifetimeMs: number }>;
+  commands?: Record<string, {
+    run(input: Value, idempotencyKey: string): Promise<Value>;
+    maxLifetimeMs: number;
+    deduplicates: boolean;              // does the target honour the idempotency key? (section 7)
+  }>;
   fakes?: Record<string, (input: Value) => Value>;          // for tests
 
   // storage and the transactional switch
@@ -1206,8 +1255,9 @@ Every implementation must give three guarantees, so code behaves the same whiche
 1. **Order:** within a topic, every reader sees events in the order they were appended.
 2. **Immutability:** an appended event never changes.
 3. **Atomic progress:** a consumer's or projection's position is saved together with the state
-   derived from it, so after a crash processing resumes exactly where the saved state ends. This is
-   what makes exactly-once processing possible.
+   derived from it, so after a crash processing resumes exactly where the saved state ends. This
+   makes state changes exactly-once; external effects are at-least-once, with idempotency keys
+   (section 7).
 
 Durability may differ, and is declared:
 
@@ -1350,7 +1400,9 @@ split, and compare-and-swap between concurrent deployers.
    plugin.
 6. The rollback rule (including returning migration logs to pending) and the state counter.
 7. Commands, `Await` and `onMsg`, with `Msg` migrations, commands tagged by deploy, command
-   lifetimes, and the 503 rule for continuations waiting across a state change.
+   lifetimes, and the 503 rule for continuations waiting across a state change. Steps for every
+   entry point, atomic commits with the outbox, idempotency keys for commands and for client
+   requests.
 8. (Pruning is deferred; see section 10.)
 9. Replay against recorded requests; OpenAPI generation; HTTP caching.
 10. Several major versions and canaries, for stateless apps and for stateful apps whose versions
@@ -1430,11 +1482,11 @@ B. *Resolved (section 1, item 8):* the core language's semantics were not versio
    now versioned builtins and cross-cutting changes are editions, both recorded in hashes; runtimes
    refuse versions they do not support, old versions are kept, any observable change (bug fixes
    included) is a new version, and a new runtime must reproduce cached results.
-C. **Effects and crashes.** Commands run after the new state is stored, so a crash between the two
-   loses or repeats them; exactly-once holds for state, not for external effects. Likely direction:
-   store pending commands atomically with the state (an outbox), with idempotency keys in plugins.
-   Also, the one-at-a-time queue must cover every entry point that changes state (WebSocket
-   messages, `@consume`, `@cron`, `onMsg`), not only HTTP requests.
+C. *Resolved (section 7, "Steps, the outbox and crashes"):* effects and crashes. Every entry point
+   runs as a step through the app's queue; a step commits its model, own events, positions and an
+   outbox of commands in one transaction; commands run afterwards with deterministic idempotency
+   keys (at least once); responses are sent only after the commit, with client idempotency keys for
+   safe retries; waiting continuations are not durable.
 D. *Resolved (section 2):* binding syntax. Bindings are annotations; a small `app` declaration holds
    the app's state, store and `onMsg`; membership is by name (`shop.*`); bindings outside any app
    belong to a stateless default app; and an app is the unit of state, versioning and rollback.
