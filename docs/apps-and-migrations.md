@@ -23,7 +23,6 @@ Prior art worth reading alongside: [Elm](https://elm-lang.org) (the app architec
 - **Compute version numbers** from what actually changed.
 - Keep everything that touches the outside world (HTTP, WebSockets, files, databases) in
   **plugins**, so new kinds of entry point and storage can be added without changing the language.
-- **Prune** what old versions leave behind, so history does not grow forever.
 - Let code be **proved**, not only tested, where a property can be stated, and keep tests for
   what proofs cannot cover.
 - Make review cheaper by changing what reviewers have to read (section 12).
@@ -39,6 +38,7 @@ Prior art worth reading alongside: [Elm](https://elm-lang.org) (the app architec
   Storage is a plugin, so these can be added later without changing the design.
 - Reverse migrations and bidirectional lenses.
 - User-defined generics.
+- Pruning: for now, code, deploy history, migration logs and events are all kept (section 10).
 
 ## What Cairn already has
 
@@ -295,7 +295,7 @@ line the design already draws:
 
 | Part | Mutability | Requirements |
 |---|---|---|
-| Code store: one entry per hash | immutable; append-only within the pruning horizon | any shared storage; instances cache entries until they are pruned |
+| Code store: one entry per hash | immutable and append-only | any shared storage; instances cache entries forever |
 | Test cache: one result per test hash | as above | as above |
 | `live` pointer and deploy history | mutable | atomic compare-and-swap, so two concurrent deploys cannot both win |
 
@@ -393,8 +393,8 @@ Why a log rather than a graph of migrations between type hashes:
 
 - **There is exactly one sequence.** In a graph, `A → B → C` and a direct `A → C` would both be
   valid paths, and since they are different functions, the migrated state would depend on which
-  path was picked. Store entries are immutable and only leave the store when pruned (section 10),
-  so a stray edge could not even be removed.
+  path was picked. Store entries are immutable and never leave the store, so a stray edge
+  could not even be removed.
 - **Fixes run.** A `fix` is a step in the log. In a graph it would be a self-loop, and a path search
   from `A` to `A` finds the empty path, so the fix would never run.
 - **Same type at both ends does not mean nothing happened.** After `A → B → A`, the state has been
@@ -589,8 +589,7 @@ delivers its result to the waiting continuation. Commands are provided by plugin
 first is an outgoing HTTP request. Every command has a **maximum lifetime**, set by its plugin (an
 HTTP call times out, for example); after it, the command's result can no longer arrive. Command
 results are where messages from an old version can outlive a deploy, which is why section 4 covers
-late `Msg` results and waiting continuations, and the lifetimes are what make pruning them safe
-(section 10).
+late `Msg` results and waiting continuations. Lifetimes also bound how long an `Await` can wait.
 
 ## 8. Cheap additions
 
@@ -730,7 +729,7 @@ config before a deploy.
 - **Replay and time travel work for every plugin**, because the interface requires each plugin to
   record what comes in (events) and what comes back (command results).
 - **Commands have lifetimes.** Each command a plugin offers declares its maximum lifetime, which
-  makes automatic pruning safe (section 10).
+  bounds how long an `Await` waits (section 7).
 
 ### Interface sketch
 
@@ -755,7 +754,7 @@ interface CairnPlugin {
   prepare?(migrate: (old: Value) => Value): Promise<Prepared>;
   commit?(p: Prepared): Promise<void>;
   abort?(p: Prepared): Promise<void>;
-  snapshot?(): Promise<Value>;          // state at a pruning horizon (section 10)
+  snapshot?(): Promise<Value>;          // a cached state, to speed up restarts and rebuilds
 }
 ```
 
@@ -790,71 +789,30 @@ under the same namespace hash, and since plugins also run checks at `update` tim
 would depend on unpinned code. A runtime refuses to load a plugin whose package hash does not
 match the one the namespace names.
 
-## 10. Pruning
+## 10. Pruning (deferred)
 
-Several parts of the design keep old versions alive, and without pruning they grow forever:
-migration logs in the deploy history (for lagging instances, late command results and rollbacks),
-old `Msg` migrations, rollback targets back to the first deploy, old major versions served side by
-side, and every code-store entry any of these still refers to.
+Pruning is deferred: for now, code, deploy history, migration logs and events are all kept. A first
+design for it conflicted with several other parts (projections rebuilt from events, event-type
+migrations applied on read, and rollback returning migration logs to pending), and nothing built so
+far depends on it. Storage grows, which is acceptable at this stage.
 
-### The support horizon
+**Snapshots stay, as a speed-up only:** a cached state at a known position, so a restart or a
+projection rebuild does not start from the beginning. The history underneath is kept, so a snapshot
+never replaces it.
 
-Pruning sets a **horizon**: a deploy before which the system stops promising anything. With the
-horizon at `v2.3.0+s4`:
+What is given up for now: storage grows without bound, and there is no way to delete data. The
+second matters more than it sounds: leaked secrets, or personal data under deletion laws such as
+GDPR, eventually make real deletion a requirement rather than a matter of tidiness.
 
-| Before the horizon | After pruning |
-|---|---|
-| Rollback | cannot cross the horizon |
-| Late command results issued earlier | dropped and logged, or delivered as a typed `Expired`, so code can handle them |
-| Instances that far behind | cannot replay logs; they load a **snapshot** of the state at the horizon |
-| Migration logs and old `Msg` migrations | deleted |
-| Older majors | retired; clients still pinned to them get `410 Gone` |
-| Code only those things used | garbage-collected from the store |
+Requirements for a future design:
 
-This does not weaken immutability. A hash never changes meaning: pruning can make an entry
-**unavailable**, never different. The store is immutable, and append-only within the horizon;
-"immutable, not eternal".
-
-The snapshot is the same idea as **squashing migrations** in database tools (Django's
-`squashmigrations`, Rails' `schema.rb`): the state at the horizon becomes the new starting point,
-and the history before it is dropped. Storage plugins produce it (`snapshot` in section 9).
-
-Once no message older than the horizon can arrive, the migrations that converted old `Msg`
-variants are no longer needed, so pruning is also how old variants stop being supported.
-
-Because the state counter already marks one-way steps, a horizon is a minimum counter: "supported
-states `s4`–`s7`".
-
-### Automatic and explicit pruning
-
-**Automatic**, for what is provably no longer needed. Nothing is lost, so the runtime does it
-without asking:
-
-- `Msg` migrations older than the longest command lifetime (section 7): no result can still arrive
-  that needs them.
-- Migration logs that every instance has already applied.
-
-**Explicit**, for anything that changes a guarantee. A person decides, with `cairn prune --before
-<version>` or a policy such as "keep the last 20 deploys or 30 days":
-
-- moving the rollback horizon,
-- retiring an old major,
-- dropping time-travel history.
-
-### The gate checks pruning
-
-Pruning changes what is supported, so it gets the same preview as a deploy:
-
-```
-cairn prune --before v2.3.0+s4 --dry-run
-  rollback: limited to v2.3.0+s4 and later (was: back to v1.0.0+s1)
-  late results: 2 pending commands were issued before the horizon and will be dropped
-  majors: v1 retired — 0 calls in the last 30 days
-  store: 1,204 entries become unreachable and will be collected
-```
-
-A prune past `live` is refused. Retiring a major that still receives traffic, or dropping pending
-command results, needs `--force`.
+1. Never delete anything rollback, redeploying after a rollback, lagging instances or forks still
+   need, in particular migration logs.
+2. Keep events, or the converters for their older types, as long as any projection may need to be
+   rebuilt from them.
+3. Support real deletion of specific data for legal reasons, which is a different problem from
+   saving space.
+4. Go through the gate with a preview of what stops being supported, like a deploy.
 
 ## 11. Verification
 
@@ -1059,9 +1017,11 @@ The core owns:
 - **typed topics**, with every event checked against the topic's type,
 - **projections**: state as a pure, total fold over events,
 - **event-type migrations** when a deploy changes a topic's type, with the same rule as `Model` and
-  `Msg` (old <: new, or a migration; event-sourcing systems call these "upcasters"),
+  `Msg` (old <: new, or a migration; event-sourcing systems call these "upcasters"). They are
+  applied when events are **read**: stored events are never rewritten, so each event keeps the type
+  it was written with, and the converters for older types are kept with it,
 - **rebuilding projections on deploy**, rollback rules, effects on computed versions (an event type
-  change moves the state counter), and pruning old events into snapshots.
+  change moves the state counter), and snapshots of projections as a speed-up (events are kept).
 
 Plugins provide storage and transport: an in-memory buffer, an append-only file, SQLite, a Kafka
 cluster; sync between repositories (section 14); connectors that bring external topics in.
@@ -1112,7 +1072,7 @@ interface LogStorage {
   append(topic: string, events: Value[]): Promise<number>;            // the new end position
   read(topic: string, from: number, max: number): Promise<Value[]>;   // in order, from a position
   commit(position: number, state: Value): Promise<void>;              // position and state, together
-  snapshot?(topic: string, at: number, state: Value): Promise<void>;  // for pruning
+  snapshot?(topic: string, at: number, state: Value): Promise<void>;  // a cached state, to speed up rebuilds
 }
 ```
 
@@ -1163,17 +1123,18 @@ Cairn can say exactly which operations need coordination and which can stay even
 
 Cairn already keeps several ordered logs built separately: the deploy history, migration logs, the
 request log for replay, and the queue of `Msg` results. With a core log, they can share one
-mechanism, with the same pruning, snapshots and sync. A plain `Model` is also expressible as a log
+mechanism, with the same snapshots and sync. A plain `Model` is also expressible as a log
 whose only event is "replace the state", folded by keeping the last value: simple apps keep writing
 `model: { ...model, visits: model.visits + 1 }`, and apps that need history, audit, replay or merging
-use real events, on one set of rules for migration, rollback and pruning.
+use real events, on one set of rules for migration and rollback.
 
 ### Limits
 
 - Ordering across topics and machines (partitions, consumer groups, delivery guarantees) is the hard
   part of real Kafka. The first version is a single-node, append-only log per instance; distribution
   comes through repository sync and the Kafka connector.
-- Replaying everything gets slow as logs grow, so snapshots (section 10) are needed early.
+- Replaying everything gets slow as logs grow, so snapshots (cached projection states at a position)
+  are needed early. Events stay underneath, so a snapshot never replaces history.
 - The log semantics are harder to change later in the core than in a plugin, so they need care up
   front.
 
@@ -1262,8 +1223,7 @@ split, and compare-and-swap between concurrent deployers.
 6. The rollback rule (including returning migration logs to pending) and the state counter.
 7. Commands, `Await` and `onMsg`, with `Msg` migrations, commands tagged by deploy, command
    lifetimes, and the 503 rule for continuations waiting across a state change.
-8. Pruning: automatic pruning of what is provably unneeded, `cairn prune` with its preview,
-   snapshots, and garbage collection of the store.
+8. (Pruning is deferred; see section 10.)
 9. Replay against recorded requests; OpenAPI generation; HTTP caching.
 10. Several major versions and canaries, for stateless apps and for stateful apps whose versions
     share the same `Model` type.
@@ -1298,5 +1258,73 @@ split, and compare-and-swap between concurrent deployers.
 - **Plugin distribution and sandboxing.** Plugins are pinned by package hash (section 9). How are
   they packaged and fetched, and is sandboxing (for example, running plugins in a separate process
   with only the capabilities they declare) worth it later?
-- **Expired results.** Should a command result that arrives after its horizon be dropped silently
-  (and logged), or delivered as a typed `Expired` value that code must handle?
+
+## Known conflicts and gaps
+
+Found in a review of the whole document. Each needs a decision before or during the step that
+depends on it. Items 3 to 5 are resolved by deferring pruning (section 10).
+
+### Conflicts between sections
+
+1. **Replicas versus repositories (sections 3 and 14).** Section 3 has several instances sharing
+   one store and one `live` pointer; section 14 makes each instance its own repository with its
+   own `live`. Likely direction: distinguish *replicas* (instances serving one repository) from
+   *repositories* (staging, production, forks, separate services).
+2. **Push moves the remote's `live` without its gate (section 14).** That breaks the rule that `live`
+   only moves through the deploy gate. Likely direction: a push stages into the remote's `dev`, or
+   makes a deploy request, and the remote's gate decides.
+3. *Resolved by deferring pruning:* pruning events into snapshots conflicted with rebuilding
+   projections from events.
+4. *Resolved by deferring pruning:* "events never change" against event-type migrations. Event
+   types are migrated on read (upcasting), with old events kept as written.
+5. *Resolved by deferring pruning:* automatic pruning of applied migration logs conflicted with
+   rollback returning those logs to pending.
+6. **The API version only covers HTTP routes (section 6).** WebSocket message types and published
+   event types are client-facing too. Versions and state counters also belong to a whole deploy,
+   so with several apps in one namespace, a change in one moves the other's version. Likely
+   direction: each plugin declares which types it exposes, and versions are computed per app.
+7. **Bindings on type aliases (sections 1, 9 and 13).** `@topic(...) type Orders` and
+   `@store(...) type Model` bind type aliases, which are expanded before hashing and so are not
+   entities with anywhere to keep a binding. Likely direction: topics and stores become named
+   declarations.
+8. **Type checking across repositories against untyped calls (sections 2, 9 and 14).** Calls are
+   written as `Http.get(service("users"), "/" ++ id)`, a string path, and the deployment config maps
+   a service to a URL, not to a repository, so there is nothing to check against. Likely direction:
+   services map to repositories, and calls go through typed clients generated from the callee's
+   routes.
+
+### Gaps
+
+A. **How app code reads and writes data is undefined.** There are three state models (the `Model`,
+   projections, and typed get/put operations on storage plugins) with no stated relation. Is reading
+   a projection a pure input like the `model`, or a command? Who writes with `put`, and how does it
+   interact with migrations and rollback? Needed before step 5; the open question "Plain `Model` as
+   a log" is part of it.
+B. **The core language's semantics are not versioned.** Builtins and plugins are pinned, but the
+   evaluator and checker are not, so "a hash fully determines behaviour" only holds while they never
+   change. Step 1 changes semantics (division), which would leave cached facts describing the old
+   behaviour and stored code that no longer type-checks. Likely direction: a language version in
+   hashes or cache keys, with an upgrade path like `cairn upgrade`.
+C. **Effects and crashes.** Commands run after the new state is stored, so a crash between the two
+   loses or repeats them; exactly-once holds for state, not for external effects. Likely direction:
+   store pending commands atomically with the state (an outbox), with idempotency keys in plugins.
+   Also, the one-at-a-time queue must cover every entry point that changes state (WebSocket
+   messages, `@consume`, `@cron`, `onMsg`), not only HTTP requests.
+D. **Binding syntax decides more than syntax.** With annotations, nothing says which `Model` or store
+   a route operates on, or which unit gets a version and state counter (item 6). Needs a decision
+   before step 5.
+
+### Smaller inconsistencies
+
+- `NonZero` is a subtype of `number`, but `decimal` literals are also called `NonZero`; it needs one
+  per number type, or a refinement such as `{ n: decimal | n != 0 }`.
+- "Every migration needs a test" should accept a proved property too, consistent with section 11.
+- A definition rehashed only because a dependency changed still changes behaviour; its behaviour
+  diff belongs in the review of the edited definition rather than being silently approved.
+- An `Await` continuation waiting across a deploy that keeps types but contains a `fix` runs old
+  logic on fixed state; consider the 503 for any deploy that changes state.
+- "Read models deploy instantly": the switch can only happen once the new projection has caught up,
+  so catching up belongs in the deploy's prepare phase.
+- Keyed projections need a built-in `Map(K, V)`, which is not among the parameterized types.
+- The auto-approved review tier includes "behaviour diff as expected", which needs a person to
+  judge.
