@@ -194,9 +194,10 @@ The first implementation targets several local processes sharing a directory
 
 ### When a migration is required
 
-On each deploy of a stateful app, the gate compares the live types with the new ones. This
-applies to the `Model` and to `Msg`: messages produced by the old version (results of commands
-it issued) can be delivered after the switch, so the new `onMsg` must accept them.
+Whenever an `update` changes the type of a stateful app, the checker compares the type dev had
+just before with the new one. This applies to the `Model` and to `Msg`: messages produced by the
+old version (results of commands it issued) can be delivered after the switch, so the new `onMsg`
+must accept them.
 
 | Change (for `Model` and for `Msg`) | Migration |
 |---|---|
@@ -213,15 +214,64 @@ migration addLastVisit(old: { visits: number }): { visits: number, lastVisit: st
 
 `Msg` migrations have the same form and are applied to pending messages during the switch.
 
-### Migrations are content-addressed
+A `migration` must change the type: one from a type to itself does nothing a migration is for, and
+is rejected. Changing data without changing its type is a `fix` (see "Fix forward" below).
 
-Types are structural, so each type has a hash. A migration is stored as an edge from one type
-hash to another. That gives:
+### Migrations form an ordered log
 
-- **Chaining.** A target several versions ahead is reached by following edges
-  (`#v1 → #v2 → #v3`). The gate's question is "is there a path from the live type to the new
-  type?".
-- **Deduplication.** The same type change written twice is the same hash.
+Which migrations run is decided by an **ordered log**, not by searching for a path between types,
+in the same way as database migration tools such as Rails, Django or Flyway.
+
+1. Each `update` that requires a migration, or adds a `fix`, **appends one step** to dev's pending
+   log. A step's input type must accept the type dev had just before (`current <: input`), so the
+   log always chains: `A → B`, then `B → C`. Changes that need no migration (`Old <: New`) add no
+   step; the next step's input type just has to accept the subtype.
+2. `deploy` runs the pending log **in order** on the live state, inside the transactional switch
+   below, then records the log in the deploy history and clears it.
+3. The gate checks that the log composes: it starts from live's type and ends at the new one.
+
+Why a log rather than a graph of migrations between type hashes:
+
+- **There is exactly one sequence.** In a graph, `A → B → C` and a direct `A → C` would both be
+  valid paths, and since they are different functions, the migrated state would depend on which
+  path was picked. Edges in an append-only store cannot be deleted, so a stray one could not even
+  be removed.
+- **Fixes run.** A `fix` is a step in the log. In a graph it would be a self-loop, and a path search
+  from `A` to `A` finds the empty path, so the fix would never run.
+- **Same type at both ends does not mean nothing happened.** After `A → B → A`, the state has been
+  through `B`: if `B` dropped a field and the step back re-added it with a default, the data
+  changed. The log runs both steps, as the code did.
+- **Lagging instances are simple.** Each deploy's log is kept in the deploy history, so an instance
+  several deploys behind (once stateful apps run on several instances) replays the logs in order.
+
+Each migration is still content-addressed like any other definition: it has a hash, and its tests
+are cached by it. Only the choice of what runs comes from the log.
+
+### Replacing pending steps with a shortcut
+
+If dev changed the type twice before a deploy (`A → B → C`), one direct `A → C` migration may be
+cleaner. An `update` may provide a migration whose input is the type at an earlier point in the
+pending log; it **replaces** the steps from that point on. The log stays the source of truth, so the
+replacement must agree with what it replaces. At `update` time the checker runs both the existing
+steps and the replacement on the live state and on the inputs the tests use, and compares the
+results:
+
+```
+replacing pending migrations addLastVisit → renameVisits with one direct migration:
+  ✓ identical result on the live state and on 4 test inputs
+```
+
+If they differ, the update shows the difference and is refused unless the user accepts it
+explicitly (`--accept-migration-diff`). This is not a proof that the two agree on every input,
+which is undecidable in general, but it is a check on the data the migration will actually run on.
+A `fix` in the replaced range is never removed by a shortcut; the shortcut can only cover the
+migrations before or after it.
+
+### Every migration needs a test
+
+Migrations change real data permanently, so the gate refuses a deploy when a `migration` or `fix`
+in the pending log has no test that uses it. The reverse dependency index behind
+`cairn dependents` already answers "which tests reach this hash?", so the check is cheap.
 
 ### Migrations cannot fail
 
@@ -233,14 +283,14 @@ Each way a migration could fail is ruled out or made harmless:
 | Produces invalid data or crashes partway | `NaN` and `Infinity` cannot occur, and division by zero must be handled in the types (section 1). The one remaining runtime error is numeric overflow, which is very rare; if it happens, the transactional switch leaves everything unchanged. |
 | Never finishes | A migration and everything it reaches must be **non-recursive**. Hashing already finds recursion groups, so the check is cheap. Iteration uses total list operations only. |
 | Exceeds memory or time | The **transactional switch** below: if the real run fails, nothing changes. A **dry run** on the live state at `update` time gives early warning, but the state can change before the switch, so the dry run is not the guarantee. |
-| Does the wrong thing | Not decidable. Tests, cached like all others, and replay (section 8). |
+| Does the wrong thing | Not decidable. At least one test per migration (required), the comparison when a shortcut replaces pending steps, and replay (section 8). |
 
 ### The switch is transactional
 
 1. Stop accepting new requests, and **wait for requests already running to finish**. Routes are
    pure and synchronous, so this takes microseconds; it is required because a request running on
    the old version would otherwise return an old-type model after the migration.
-2. Run the migrations on that exact state and on the pending messages.
+2. Run the pending log, in order, on that exact state and on the pending messages.
 3. On success, switch the code pointer and the state together, and resume.
 4. On failure, discard the result and resume on the old version. Nothing changed.
 
@@ -250,9 +300,16 @@ keeps serving, untouched. No half-migrated state exists.
 ### Fix forward
 
 A migration with a logic bug is corrected by deploying again. Because the corrected data often
-has the same type, the gate also accepts an explicit **same-type data-fix migration**
-(`New → New`), checked and applied exactly like any other migration. Without it, fixing data
-would require inventing a fake type change.
+has the same type, there is a separate declaration for it:
+
+```
+fix backfillLastVisit(m: Model): Model = { ...m, lastVisit: guessFrom(m.visits) }
+```
+
+A `fix` must have the same input and output type. It is checked like a migration (non-recursive,
+no invalid operations, at least one test), appended to the log, and always runs once, in order. It
+is a separate keyword so the checker never confuses an intended fix with a pointless same-type
+migration. Without it, fixing data would require inventing a fake type change.
 
 ## 5. Rollback
 
@@ -271,7 +328,7 @@ Consequences:
 | Deploy being rolled back | Rollback |
 |---|---|
 | Body-only change | allowed |
-| Same-type data fix | allowed, but the data stays fixed: rollback does not undo migrations |
+| A `fix` | allowed, but the data stays fixed: rollback does not undo migrations or fixes |
 | Added a field (a migration ran) | allowed: `{visits, lastVisit} <: {visits}`, the old code ignores the field |
 | Removed a field | allowed only if the value check finds the field still present |
 | Changed a field's type | refused |
@@ -395,7 +452,8 @@ These fall out of the design with little extra work:
    local instances.
 3. Computed API versions, and `cairn deploy --dry-run`.
 4. Stateful apps: `init` and `Model` on a single instance, the migration requirement for `Model`,
-   totality checks, the transactional switch and data-fix migrations.
+   totality checks, the migration log, the transactional switch, `fix` declarations, required
+   migration tests, and shortcut comparison.
 5. The rollback rule and the state counter.
 6. Commands and `onMsg`, with `Msg` migrations.
 7. Replay against recorded requests; OpenAPI generation; HTTP caching.
@@ -403,8 +461,6 @@ These fall out of the design with little extra work:
 
 ## Open questions
 
-- **Several migration paths.** If more than one chain leads from the live type to the new one,
-  should the gate pick the shortest, or require the path to be unique?
 - **Stateful apps across instances.** Where does a stateful app's model live once it outgrows one
   instance, and how does the transactional switch work there?
 - **The first version.** Does the first deploy of an app start at `1.0.0` or `0.1.0`, and do
