@@ -536,6 +536,12 @@ These fall out of the design with little extra work:
   project sets its own minimum in `cairn.json` (none by default), over definitions changed since
   live or over all of them, and the deploy gate enforces it. Coverage says code ran, not that it was
   checked, which is why no minimum is imposed by default. (Built in the prototype.)
+- **Mutation testing.** Coverage cannot tell whether tests would notice a mistake; mutation
+  testing can. Small deliberate changes (`<` to `<=`, a negated condition, `n` to `n + 1`) are
+  evaluated in place of the original hash, only against tests whose coverage reaches the
+  definition, and each verdict is cached per (mutant, test), so the usual cost of mutation testing
+  mostly disappears. A project can set a minimum score for the deploy gate. (Built in the
+  prototype.)
 - **Canary deploys.** Send a percentage of requests to the new namespace: two pointers and a
   weighted choice. For stateful apps this has the same restriction as several majors.
 

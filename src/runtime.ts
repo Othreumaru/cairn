@@ -7,6 +7,7 @@ import { BUILTINS, currentVersion } from "./builtins.ts";
 import { parseExpr } from "./parser.ts";
 import { showType } from "./pretty.ts";
 import { coverage, type CoverageReport, type CoverageScope, describeCoverage } from "./coverage.ts";
+import { describeMutation, mutation, type MutationReport } from "./mutation.ts";
 
 /**
  * The runtime owns the `live` namespace. Nothing reaches it except through `deploy`, and
@@ -28,6 +29,7 @@ export type DeployReport = {
   changed: string[];
   runs: TestRun[];
   coverage?: CoverageReport;
+  mutation?: MutationReport;
   reason?: string;
 };
 
@@ -118,7 +120,11 @@ export function runTests(
 
 export function deploy(
   state: State,
-  opts: { onRun?: (r: TestRun) => void; coverage?: { minimum: number; of: CoverageScope } } = {},
+  opts: {
+    onRun?: (r: TestRun) => void;
+    coverage?: { minimum: number; of: CoverageScope };
+    mutation?: { minimum: number; of: CoverageScope }; // only run when minimum > 0
+  } = {},
 ): DeployReport {
   const staged = state.dev;
   const live = state.live ?? {};
@@ -149,6 +155,16 @@ export function deploy(
     report.coverage = coverage(state, staged, opts.coverage.of, state.live);
     if (report.coverage.percent < opts.coverage.minimum) {
       report.reason = `coverage is ${describeCoverage(report.coverage)}, below the minimum of ${opts.coverage.minimum}%`;
+      return report;
+    }
+  }
+
+  // Mutation testing: do the tests notice small deliberate mistakes? Verdicts are cached per
+  // (mutant, test), so this only costs anything for new code or new tests.
+  if (opts.mutation && opts.mutation.minimum > 0) {
+    report.mutation = mutation(state, staged, opts.mutation.of, state.live);
+    if (report.mutation.score < opts.mutation.minimum) {
+      report.reason = `mutation score is ${describeMutation(report.mutation)}, below the minimum of ${opts.mutation.minimum}%`;
       return report;
     }
   }

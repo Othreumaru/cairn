@@ -9,6 +9,7 @@ import { showDecl, showExpr } from "../src/pretty.ts";
 import { deploy, evaluate, rollback, runTests } from "../src/runtime.ts";
 import { parseConfig } from "../src/config.ts";
 import { coverage } from "../src/coverage.ts";
+import { mutants, mutation } from "../src/mutation.ts";
 import { runtimeFor } from "../src/host.ts";
 import { handle } from "../src/plugins/http.ts";
 import { frame, parseFrames, ws } from "../src/plugins/ws.ts";
@@ -533,4 +534,65 @@ test("cairn.json: coverage settings are validated, with reporting only by defaul
   assert.throws(() => parseConfig('{ "coverage": { "minimum": 120 } }'), /from 0 to 100/);
   assert.throws(() => parseConfig('{ "coverage": { "of": "some" } }'), /"changed" or "all"/);
   assert.throws(() => parseConfig("{"), /not valid JSON/);
+});
+
+// ---------------- mutation testing ----------------
+
+const shippingSrc = `
+  def shipping(total: number): number = if total < 100 then 5 else 0
+  test small = shipping(20) == 5
+  test big = shipping(250) == 0`;
+
+test("mutation testing finds the untested boundary that full coverage misses", () => {
+  const s = fresh(shippingSrc);
+  runTests(s, s.dev, {}, new Set());
+  assert.equal(coverage(s, s.dev, "all", null).percent, 100);
+  const r = mutation(s, s.dev, "all", null);
+  assert.deepEqual(r.defs[0].survivors, ["'<' → '<=' in 'total < 100': no test fails", "100 → 101 in '100': no test fails"]);
+  assert.equal(r.score, 60);
+
+  update(s, `test exactlyHundred = shipping(100) == 0`);
+  runTests(s, s.dev, {}, new Set());
+  assert.equal(mutation(s, s.dev, "all", null).score, 100);
+});
+
+test("mutants cover operators, conditions and literals, and repeated sites are numbered", () => {
+  const s = fresh(`def f(a: number, b: number): boolean = !(a * b > 1) && a * b == 0`);
+  const named = mutants(s.entries[s.dev.f], parseProgram(view(s, s.dev, "f"))[0].body).map((m) => m.label);
+  assert.deepEqual(named, [
+    "'&&' → '||' in '!(a * b > 1) && a * b == 0'",
+    "'!' removed in '!(a * b > 1)'",
+    "'>' → '>=' in 'a * b > 1'",
+    "'*' → '/' in 'a * b'",
+    "1 → 2 in '1'",
+    "'==' → '!=' in 'a * b == 0'",
+    "'*' → '/' in 'a * b' (occurrence 2)",
+    "0 → 1 in '0'",
+  ]);
+});
+
+test("mutation verdicts are cached per mutant and test, and unreached code is reported as such", () => {
+  const s = fresh(shippingSrc + `\n def unused(n: number): number = n + 1`);
+  runTests(s, s.dev, {}, new Set());
+  mutation(s, s.dev, "all", null);
+  const cached = Object.keys(s.mutationCache!).length;
+  assert.ok(cached > 0);
+  const again = mutation(s, s.dev, "all", null);
+  assert.equal(Object.keys(s.mutationCache!).length, cached, "nothing new to compute");
+  assert.deepEqual(again.defs.find((d) => d.name === "unused")!.survivors, [
+    "'+' → '-' in 'n + 1': no test reaches unused",
+    "1 → 2 in '1': no test reaches unused",
+  ]);
+});
+
+test("the deploy gate enforces a mutation minimum only when one is set", () => {
+  const s = fresh(shippingSrc);
+  const gate = (minimum: number) => deploy(s, { mutation: { minimum, of: "changed" } });
+  const refused = gate(80);
+  assert.equal(refused.accepted, false);
+  assert.match(refused.reason!, /mutation score is 60% of mutants killed in changed definitions \(3\/5\), below the minimum of 80%/);
+  const off = gate(0);
+  assert.ok(off.accepted);
+  assert.equal(off.mutation, undefined, "with no minimum, deploy does not run mutation testing");
+  assert.deepEqual(parseConfig('{ "mutation": { "minimum": 70 } }').mutation, { minimum: 70, of: "changed" });
 });

@@ -20,6 +20,7 @@ export type State = {
   live: Namespace | null; // what the runtime serves; only `deploy` writes here
   history: { id: string; ns: Namespace; at: string }[];
   testCache: Record<string, TestResult>; // a test result is a permanent fact about a hash
+  mutationCache?: Record<string, boolean>; // "mutant:test" -> does the test fail on the mutant (see mutation.ts)
 };
 
 export const emptyState = (): State => ({ entries: {}, dev: {}, live: null, history: [], testCache: {} });

@@ -25,7 +25,7 @@ build step and no loader. `npm install` only fetches TypeScript, for `npm run ty
 
 ```sh
 npm install
-npm test               # 38 unit tests
+npm test               # 42 unit tests
 sh examples/demo.sh    # end-to-end walkthrough (output also in DEMO.md)
 ./cairn                # CLI help
 ```
@@ -72,6 +72,41 @@ A project chooses its own minimum in `cairn.json`, which the deploy gate enforce
 
 Coverage says code ran, not that it was checked, so a high minimum is a choice for each project,
 not a default.
+
+## Mutation testing
+
+Mutation testing checks what coverage cannot: whether the tests would notice a mistake. It makes
+small deliberate changes to each definition (`<` to `<=`, `+` to `-`, a negated condition, `100` to
+`101`, ...) and runs the tests that reach it. A change no test notices has *survived*:
+
+```
+def shipping(total: number): number = if total < 100 then 5 else 0
+test small = shipping(20) == 5
+test big = shipping(250) == 0
+```
+
+```
+$ cairn mutate
+mutation: 60% of mutants killed in changed definitions (3/5)
+  survived — shipping: '<' → '<=' in 'total < 100': no test fails
+  survived — shipping: 100 → 101 in '100': no test fails
+```
+
+Coverage is 100% here, yet nothing checks a total of exactly 100. Adding
+`test exactlyHundred = shipping(100) == 0` kills both.
+
+It is cheap in Cairn: a mutant is handed to the evaluator in place of the original's hash, so
+nothing is restaged; only tests whose coverage reaches the definition run; and each verdict is a
+permanent fact about the pair (mutant, test), cached in the state, so repeat runs are free.
+
+`cairn mutate [--all]` reports; a minimum in `cairn.json` makes the deploy gate enforce it:
+
+```json
+{ "mutation": { "minimum": 70, "of": "changed" } }
+```
+
+Some mutants can never be killed because they do not change behaviour (an *equivalent mutant*,
+such as moving a threshold where both sides give the same result), so 100% is not always reachable.
 
 ## Plugins: HTTP and WebSockets
 
@@ -130,6 +165,7 @@ one shared state file on one machine.
 | Rollback | `runtime.ts` | The previous namespace is just another pointer, and the code it refers to is still in the append-only store. |
 | Versioned builtins | `builtins.ts`, `hash.ts`, `codebase.ts` | Builtins are immutable and versioned; hash-form code pins `name@version`, so a builtin's version is part of every hash that uses it. Publishing a new version changes nothing stored: old code (and rollback targets) keep running the old version. `upgrade` re-hashes the code still pinned to an old version, propagates to dependents, and the next deploy re-runs exactly the tests that reach the changed builtin. Code re-hashed for an unrelated edit keeps its pins. |
 | Test coverage | `coverage.ts`, `eval.ts`, `config.ts` | The evaluator records the definitions and `if` branches a test reaches; the set is cached with the test's result, like the result itself. `cairn.json` sets a minimum the deploy gate enforces, over changed or all definitions. |
+| Mutation testing | `mutation.ts` | Deliberate small mistakes are evaluated in place of the original hash, only against tests whose coverage reaches the definition; verdicts are cached per (mutant, test). `cairn.json` can set a minimum score for the deploy gate. |
 | Plugins | `plugins/`, `host.ts`, `store.ts` | `@plugin(...)` bindings are checked by their plugin at update time and hashed with the def, including the plugin version. The host gives plugins a runtime and follows the state file, so one deploy switches every instance; `http` and `ws` check inputs against the declared types and project outputs onto them. |
 | Runaway tests | `eval.ts`, `runtime.ts` | Evaluation budget plus stack-overflow capture: a non-terminating test fails the gate instead of hanging it. |
 
@@ -152,7 +188,8 @@ src/
   plugins/      the plugin interface, the JSON mapping, and the http and ws plugins
   store.ts      loading and atomic saving of the state file
   coverage.ts   coverage units, recorded per test and reported per definition
-  config.ts     project settings from cairn.json (the coverage policy)
+  mutation.ts   mutation testing: mutants, verdicts cached per (mutant, test), scores
+  config.ts     project settings from cairn.json (coverage and mutation policies)
   cli.ts        command line
 test/           unit tests (node:test)
 examples/       v1 … v7 scenario files + demo.sh

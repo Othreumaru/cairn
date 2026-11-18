@@ -7,6 +7,7 @@ import { deploy, evaluate, rollback, runTests, type TestRun } from "./runtime.ts
 import { showType } from "./pretty.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { coverage, type CoverageReport, describeCoverage } from "./coverage.ts";
+import { describeMutation, mutation, type MutationReport } from "./mutation.ts";
 import { host } from "./host.ts";
 import { PLUGINS } from "./plugins/index.ts";
 import { load, save, stateFile } from "./store.ts";
@@ -30,6 +31,14 @@ function printCoverage(r: CoverageReport, minimum: number, indent: string, limit
   const gaps = r.defs.filter((d) => d.missing.length);
   for (const d of gaps.slice(0, limit)) console.log(`${indent}  ${d.name} (${d.covered}/${d.total}): ${d.missing.join("; ")}`);
   if (gaps.length > limit) console.log(`${indent}  … and ${gaps.length - limit} more (cairn coverage)`);
+}
+
+function printMutation(r: MutationReport, minimum: number, indent: string, limit = Infinity) {
+  const min = minimum > 0 ? `, minimum ${minimum}%${r.score < minimum ? " — NOT MET" : ""}` : "";
+  console.log(`${indent}mutation: ${describeMutation(r)}${min}`);
+  const survivors = r.defs.flatMap((d) => d.survivors.map((s) => `${d.name}: ${s}`));
+  for (const s of survivors.slice(0, limit)) console.log(`${indent}  survived — ${s}`);
+  if (survivors.length > limit) console.log(`${indent}  … and ${survivors.length - limit} more (cairn mutate)`);
 }
 
 function printUpdate(state: State, prevDev: Namespace, r: UpdateReport, title: string, dryRun: boolean, skipTests: boolean, config: Config): number {
@@ -77,13 +86,17 @@ function main(argv: string[]) {
   const prevDev = { ...state.dev };
   // cairn.json sets the coverage policy; --min-coverage N overrides its minimum for this command.
   const config = loadConfig();
-  const mi = args.indexOf("--min-coverage");
-  if (mi >= 0) {
-    const n = mi + 1 < args.length ? Number(args[mi + 1]) : NaN;
-    if (!(n >= 0 && n <= 100)) throw new CairnError("--min-coverage needs a number from 0 to 100");
-    config.coverage.minimum = n;
+  // --min-coverage N and --min-mutation N override cairn.json's minimums for this command.
+  const flagValues = new Set<number>();
+  for (const [flag, key] of [["--min-coverage", "coverage"], ["--min-mutation", "mutation"]] as const) {
+    const i = args.indexOf(flag);
+    if (i < 0) continue;
+    const n = i + 1 < args.length ? Number(args[i + 1]) : NaN;
+    if (!(n >= 0 && n <= 100)) throw new CairnError(`${flag} needs a number from 0 to 100`);
+    config[key].minimum = n;
+    flagValues.add(i + 1);
   }
-  const rest = args.filter((a, i) => !a.startsWith("--") && !(mi >= 0 && i === mi + 1));
+  const rest = args.filter((a, i) => !a.startsWith("--") && !flagValues.has(i));
 
   switch (cmd) {
     case "update": {
@@ -105,6 +118,7 @@ function main(argv: string[]) {
       const r = deploy(state, {
         onRun: (run) => printRun(run),
         coverage: config.coverage,
+        mutation: config.mutation,
       });
       if (r.reason && r.accepted && !r.runs.length) {
         console.log(`  ${r.reason}`);
@@ -114,6 +128,7 @@ function main(argv: string[]) {
       console.log(`  changes: +${r.added.length} added, ~${r.changed.length} changed, -${r.removed.length} removed`);
       console.log(`  tests: ${r.runs.length} total — ${ran} ran, ${r.runs.length - ran} served from cache`);
       if (r.coverage?.total) printCoverage(r.coverage, config.coverage.minimum, "  ", 5);
+      if (r.mutation?.total) printMutation(r.mutation, config.mutation.minimum, "  ", 5);
       save(state); // test results are cached even when the deploy is rejected
       if (!r.accepted) {
         console.log(`\nREJECTED — ${r.reason}. live unchanged at ${nsLabel(r.fromId)}.`);
@@ -212,6 +227,17 @@ function main(argv: string[]) {
       return r.percent < config.coverage.minimum ? 1 : 0;
     }
 
+    case "mutate": {
+      // Mutation testing of dev: of what changed since live (default) or --all.
+      const of = args.includes("--all") ? "all" : args.includes("--changed") ? "changed" : config.mutation.of;
+      runTests(state, state.dev, state.live ?? {}, new Set()); // coverage tells which tests can reach each definition
+      const r = mutation(state, state.dev, of, state.live);
+      save(state); // verdicts are cached, so the next run is free
+      printMutation(r, config.mutation.minimum, "");
+      for (const d of r.defs.filter((x) => x.total && !x.survivors.length)) console.log(`  ${d.name}: all ${d.total} mutants killed`);
+      return r.score < config.mutation.minimum ? 1 : 0;
+    }
+
     case "bindings": {
       const ns = args.includes("--dev") ? state.dev : state.live ?? {};
       const rows = Object.keys(ns)
@@ -253,6 +279,11 @@ function main(argv: string[]) {
                               branch of each if. The minimum comes from cairn.json
                               ({ "coverage": { "minimum": 80, "of": "changed" } }) and is
                               enforced by deploy; --min-coverage N overrides it
+  mutate [--all|--changed]    mutation testing: make small deliberate mistakes in each definition
+                              ('<' to '<=', '+' to '-', negated conditions, n to n+1, ...) and
+                              check a test fails for each. The deploy gate enforces cairn.json's
+                              { "mutation": { "minimum": 70 } } when set; --min-mutation N
+                              overrides it
   upgrade [--dry-run] [--skip-tests]
                               move code pinned to old builtin versions onto the current ones
   rename <old> <new>          rename (free: hashes don't change)
