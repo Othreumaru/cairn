@@ -275,7 +275,8 @@ def shop.handleMsg(msg: Msg, model) = { model: model, cmds: [] }
 ### Apps and membership
 
 - **An `app` declares what belongs to the app as a whole:** its `Model` type and initial value, the
-  logical resource that stores it, and its `onMsg`. It does not list its routes.
+  logical resource that stores it, its `onMsg`, and the projections it reads (`views`, below). It
+  does not list its routes.
 - **Membership is by name:** app `shop` owns the definitions named `shop.*`. A bound definition in
   an app receives the app's `model`, checked against the app's `Model` type.
 - **Why by name.** Names are mutable pointers and hashes are code. Which app a route belongs to is
@@ -298,6 +299,58 @@ An `app` block containing its routes was considered and not chosen: every plugin
 section inside the block, a new kind of binding would mean changing the `app` syntax, and top-level
 bindings would have to move inside. Annotations with membership by name give the same grouping
 without those costs.
+
+### Data: what code reads and writes
+
+An app's state changes in exactly **two ways**:
+
+1. **Returning a new `model`.** For small or medium state (counters, settings, a session table),
+   the `Model` is a value that routes and handlers return. It is covered by the migration log,
+   rollback and replay.
+2. **Publishing events.** For large or historical data (all orders), the data lives in
+   **projections** folded from the app's topics (section 13). The only way to change a projection
+   is to publish an event. It is covered by event-type upcasting, rebuilding on deploy and replay.
+
+There is **no direct write to storage from code.** A `put` would change stored data outside both
+paths: no migration log, nothing to rebuild from or replay, and nothing rollback could reason about.
+Storage plugins are only *where* the `Model` and projections are kept, never a separate way to
+write.
+
+**Reads are pure inputs, from one snapshot per request.** An app names the projections it reads,
+and its bound definitions receive them as `views`:
+
+```
+app shop {
+  model: { visits: number } = { visits: 0 }
+  store: "shop"
+  views: { orders: shop.orderRow }      // a keyed projection (section 13)
+}
+
+@http("GET /orders/:id")
+def shop.order(req: { params: { id: string } }, model, views) =
+  case views.orders.get(req.params.id) of
+    Some(o) => Reply({ response: { status: 200, body: o }, model: model, cmds: [] })
+    None    => Reply({ response: { status: 404, body: {} }, model: model, cmds: [] })
+```
+
+- **Reads are not commands**, so no `Await` is needed. A view is a read-only handle with typed
+  queries (`get(key)`, `scan(filter)`, `count`), which each plugin translates for its backend.
+- **Reads are deterministic.** A query's result is fully determined by (projection hash, log
+  position, query). Every view a request reads is read **as of one position**, fixed when the
+  request starts: snapshot isolation, so no request sees half of another's effect, and replay only
+  needs to record the position, not the results.
+- **Queries are type-checked** against the projection's type at `update`, so changing a projection's
+  type re-checks every query on it.
+- **In tests**, views are built from a list of events by the in-memory plugin; the same queries give
+  the same results, cached like everything else.
+
+**Data the app does not own** (an existing external database, another team's service) is not app
+state. It is reached through commands (`Await(sql.query(...))`), as effects with no migration or
+rollback guarantees, and `cairn risks` lists those accesses as plugin boundaries: the explicit
+escape hatch, like `partial def`.
+
+So there are three separate things: the `Model` (a value), projections (derived from events, read
+through views), and external data (commands).
 
 ### Routes
 
@@ -836,9 +889,10 @@ public interface as any third-party plugin, are pinned by package hash like any 
 swappable through logical resources: code says `store: "orders"`, and the deployment config maps
 it to SQLite on a laptop and to another database plugin in production, with the same hash in both.
 
-For backends to be swappable, Cairn code contains **no SQL strings**. It uses typed operations
-(get, put, scan, filter by fields, and the keyed projections of section 13) that each plugin
-translates for its backend. That also keeps queries type-checked and within the solver's reach.
+For backends to be swappable, Cairn code contains **no SQL strings**. Reads are typed, read-only
+queries on views (`get`, `scan`, `count`, filters by field; section 2) that each plugin translates
+for its backend; writes happen only by returning a new `model` or publishing events. That also keeps
+queries type-checked and within the solver's reach.
 
 | Plugin | Role | Notes |
 |---|---|---|
@@ -1293,7 +1347,7 @@ split, and compare-and-swap between concurrent deployers.
    migration requirement for `Model`, totality checks, the migration log, the transactional switch
    and two-phase deploy, `fix` declarations and required migration tests. Storage through the
    storage plugin interface, starting with in-memory and file storage, then the bundled SQLite
-   plugin with typed operations.
+   plugin.
 6. The rollback rule (including returning migration logs to pending) and the state counter.
 7. Commands, `Await` and `onMsg`, with `Msg` migrations, commands tagged by deploy, command
    lifetimes, and the 503 rule for continuations waiting across a state change.
@@ -1309,7 +1363,8 @@ split, and compare-and-swap between concurrent deployers.
 12. Review: approvals cached by hash with inheritance for rehashed-only definitions and
     `cairn review`; behaviour diffs from test examples and replay, later from generated inputs; the
     risk-ordered queue and opt-in auto-approval.
-13. Event log: typed topics, `publish`, `@consume`, keyed projections rebuilt on deploy, the
+13. Event log: typed topics, `publish`, `@consume`, keyed projections rebuilt on deploy, views with
+    typed read-only queries read as of one position per request, the
     `LogStorage` interface with in-memory, file and SQLite plugins, positions and read-your-writes;
     then convergence checks from algebraic laws and invariant confluence.
 14. Instances as repositories: push, pull and fork of code; facts that travel; type checking of
@@ -1322,8 +1377,9 @@ split, and compare-and-swap between concurrent deployers.
   proved order-independent, and with a single ordered log otherwise. Still open: partitioning a
   single ordered log across machines, and how the transactional switch spans instances that share
   one.
-- **Plain `Model` as a log.** Should every `Model` become a log of "replace" events (section 13), so
-  there is one state mechanism, or should the plain `Model` stay separate for simplicity?
+- **Plain `Model` as a log.** The `Model` stays a separate value for simplicity (section 2, "Data").
+  It could later be implemented as a log of "replace" events without changing the language; not
+  blocking.
 - **The first version.** Does the first deploy of an app start at `1.0.0` or `0.1.0`, and do
   `0.x` versions relax the rules as in semver?
 - **Plugin distribution and sandboxing.** Plugins are pinned by package hash (section 9). How are
@@ -1366,11 +1422,10 @@ depends on it. Items 3 to 5 are resolved by deferring pruning (section 10).
 
 ### Gaps
 
-A. **How app code reads and writes data is undefined.** There are three state models (the `Model`,
-   projections, and typed get/put operations on storage plugins) with no stated relation. Is reading
-   a projection a pure input like the `model`, or a command? Who writes with `put`, and how does it
-   interact with migrations and rollback? Needed before step 5; the open question "Plain `Model` as
-   a log" is part of it.
+A. *Resolved (section 2, "Data"):* how app code reads and writes data. State changes only by
+   returning a new `model` or publishing events; there is no direct write to storage; projections
+   are read through `views` with typed read-only queries, as of one position per request; data the
+   app does not own is reached through commands.
 B. *Resolved (section 1, item 8):* the core language's semantics were not versioned. Operators are
    now versioned builtins and cross-cutting changes are editions, both recorded in hashes; runtimes
    refuse versions they do not support, old versions are kept, any observable change (bug fixes
