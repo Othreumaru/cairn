@@ -9,6 +9,7 @@ import { type Config, loadConfig } from "./config.ts";
 import { coverage, type CoverageReport, describeCoverage } from "./coverage.ts";
 import { describeMutation, mutation, type MutationReport } from "./mutation.ts";
 import { host } from "./host.ts";
+import { risks } from "./risks.ts";
 import { PLUGINS } from "./plugins/index.ts";
 import { load, save, stateFile } from "./store.ts";
 
@@ -45,7 +46,7 @@ function printUpdate(state: State, prevDev: Namespace, r: UpdateReport, title: s
   console.log(`${title}${dryRun ? " (dry run)" : ""}:`);
   if (r.fileErrors.length) {
     for (const e of r.fileErrors) console.log(`  ✗ ${e.name}${e.line ? ` (line ${e.line}:${e.col})` : ""}: ${e.error}`);
-    console.log("\nnothing applied — fix the type errors above.");
+    console.log("\nnothing applied — fix the errors above.");
     return 1;
   }
   const interesting = r.changes.filter((c) => c.kind.k !== "unchanged");
@@ -238,6 +239,23 @@ function main(argv: string[]) {
       return r.score < config.mutation.minimum ? 1 : 0;
     }
 
+    case "risks": {
+      // Where the guarantees stop: in all of dev, or (--deploy) only in what changed since live.
+      runTests(state, state.dev, state.live ?? {}, new Set()); // coverage needs every test's recorded reach
+      save(state);
+      const rs = risks(state, state.dev, args.includes("--deploy") ? state.live : undefined);
+      if (!rs.length) console.log("no risks found");
+      const titles = { partial: "may not terminate", binding: "trusted plugin boundaries", untested: "not fully tested" } as const;
+      for (const kind of ["partial", "binding", "untested"] as const) {
+        const group = rs.filter((r) => r.kind === kind);
+        if (!group.length) continue;
+        console.log(`${titles[kind]}:`);
+        for (const r of group) console.log(`  ${r.name.padEnd(14)} ${r.detail}`);
+      }
+      console.log("(run cairn mutate for tests that would not notice a mistake)");
+      return 0;
+    }
+
     case "bindings": {
       const ns = args.includes("--dev") ? state.dev : state.live ?? {};
       const rows = Object.keys(ns)
@@ -274,6 +292,8 @@ function main(argv: string[]) {
   serve [--http N] [--ws N]   serve the bindings in live through the http and ws plugins (default:
                               --http 3000), switching to each new deploy as it happens
   bindings [--dev]            list the plugin bindings in live (or dev)
+  risks [--deploy]            every place the guarantees stop: partial defs (may not terminate),
+                              plugin bindings, untested code; --deploy: only what changed since live
   coverage [--all|--changed]  test coverage of dev: of what changed since live (default) or of
                               everything; each definition counts once for running and once per
                               branch of each if. The minimum comes from cairn.json

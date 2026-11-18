@@ -27,6 +27,7 @@ export type Entry = {
   localNames: string[]; // original local binder names, in traversal order (metadata, not hashed)
   group?: { hash: string; index: number; members: string[] };
   binding?: Binding; // plugin, plugin version and arguments; hashed, so rebinding changes the hash
+  partial?: true; // `partial def`; hashed, so marking or unmarking changes the hash
   origName: string; // metadata only
 };
 
@@ -244,6 +245,7 @@ export function denormalize(entry: Entry, nameOf: (hash: string) => string | und
     span: { line: 0, col: 0 },
     builtins: Object.keys(builtins).length ? builtins : undefined,
     binding: entry.binding,
+    partial: entry.partial,
   };
 }
 
@@ -320,7 +322,7 @@ export function hashDecls(decls: Decl[], external: (name: string) => string | un
       const d = byName.get(name)!;
       const localNames: string[] = [];
       const body = normalize(d.body, resolveFor(d), new Map(), 0, localNames);
-      return { d, body, localNames, payload: { kind: d.kind, sig: d.sig, body, binding: d.binding } };
+      return { d, body, localNames, payload: { kind: d.kind, sig: d.sig, body, binding: d.binding, partial: d.partial } };
     });
 
     let hashes: string[];
@@ -351,6 +353,7 @@ export function hashDecls(decls: Decl[], external: (name: string) => string | un
         localNames: n.localNames,
         group: isCycle ? { hash: groupHash!, index: i, members: hashes } : undefined,
         binding: n.d.binding,
+        partial: n.d.partial,
         origName: n.d.name,
       });
     });

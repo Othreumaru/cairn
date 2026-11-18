@@ -279,6 +279,29 @@ function updateDecls(state: State, decls: Decl[], opts: { dryRun?: boolean }): U
   }
 
   for (const c of report.changes) if (c.newHash && c.newHash !== c.oldHash && state.entries[c.newHash]) c.known = true;
+
+  // Recursion is only allowed in `partial def`, and total code may not call partial code, so the
+  // marker appears everywhere a risk of not terminating reaches. Tests are exempt: they always run
+  // under the evaluation budget, and nothing is built on them.
+  if (hashed) {
+    const newByHash = new Map([...hashed.values()].map((e) => [e.hash, e]));
+    const nameOf = new Map([...names, ...[...hashed].map(([n, e]) => [e.hash, n] as const)]);
+    const entryOf = (h: string) => newByHash.get(h) ?? state.entries[h];
+    for (const [name, e] of hashed) {
+      if (e.kind === "test" || e.partial) continue;
+      const fix = `declare it 'partial def ${name}'`;
+      if (e.group) {
+        const peers = e.group.members.filter((h) => h !== e.hash).map((h) => `'${nameOf.get(h)}'`);
+        const why = peers.length ? `is mutually recursive with ${peers.join(", ")}` : "calls itself";
+        report.fileErrors.push({ name, error: `'${name}' ${why}, so it may not terminate: ${fix}` });
+        continue;
+      }
+      const partialDeps = e.deps.filter((h) => entryOf(h)?.partial).map((h) => `'${nameOf.get(h) ?? short(h)}'`);
+      if (partialDeps.length)
+        report.fileErrors.push({ name, error: `'${name}' calls partial ${partialDeps.join(", ")}, and total code may not call partial code: ${fix}` });
+    }
+    if (report.fileErrors.length) report.ok = false;
+  }
   if (!report.ok || !hashed) return report;
 
   // --- Commit: new entries are appended; the dev namespace pointers move.

@@ -91,6 +91,7 @@ export function showDecl(d: Decl): string {
     const args = d.binding.args.map((a) => (typeof a === "string" ? JSON.stringify(a) : String(a))).join(", ");
     return `@${d.binding.plugin}(${args}) ${showDecl({ ...d, binding: undefined })}`;
   }
+  if (d.partial) return `partial ${showDecl({ ...d, partial: undefined })}`;
   // Re-sugar `def f(a: A): R = body` when the body is a fully annotated lambda matching the sig.
   if (d.sig.k === "fn" && d.body.t === "lam" && d.body.params.every((p) => p.type)) {
     const ps = d.body.params.map((p) => `${p.name}: ${showType(p.type!)}`).join(", ");

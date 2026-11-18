@@ -25,7 +25,7 @@ build step and no loader. `npm install` only fetches TypeScript, for `npm run ty
 
 ```sh
 npm install
-npm test               # 42 unit tests
+npm test               # 45 unit tests
 sh examples/demo.sh    # end-to-end walkthrough (output also in DEMO.md)
 ./cairn                # CLI help
 ```
@@ -44,6 +44,36 @@ The workflow is the Unison "scratch file" model: a source file holds only what y
 ```
 
 State lives in `./.cairn/state.json` (override with `CAIRN_HOME`).
+
+## Recursion is explicit
+
+Recursion is only allowed in a `partial def`, and total code may not call partial code, so a
+definition that calls a partial one must be marked `partial` too:
+
+```
+partial def fact(n: number): number = if n <= 1 then 1 else n * fact(n - 1)
+def twice(n: number): number = fact(n) * 2
+```
+
+```
+✗ twice: 'twice' calls partial 'fact', and total code may not call partial code: declare it 'partial def twice'
+```
+
+The marker therefore appears everywhere a risk of not terminating reaches, which makes the tricky
+code easy to find for people and tools. (The design plans `map`, `filter`, `fold` and `range` for
+everyday iteration, so most code will not need `partial` at all.) Tests may call partial code: they
+always run under the evaluation budget.
+
+`cairn risks` lists every place the guarantees stop, for the whole codebase or, with `--deploy`, for
+what changed since live:
+
+```
+may not terminate:
+  fact           recursive
+  isEven         mutually recursive
+not fully tested:
+  isOdd          'if n == 0' never true
+```
 
 ## Test coverage
 
@@ -157,7 +187,7 @@ one shared state file on one machine.
 | Structural subtyping | `types.ts` | Width (`{a,b,c} <: {a,b}`) and depth. Depth is sound *because* records are immutable. Functions are contravariant in parameters. |
 | Bidirectional typing | `check.ts` | `synth` vs `check`. Top-level signatures are required; expected types flow into lambdas and record literals, so `applyTwice(x => x * 3, 2)` needs no annotation on `x`. |
 | Content addressing | `hash.ts` | References become hashes, locals become de Bruijn levels, record fields are sorted. Renaming a local, reformatting or renaming a dependency never changes a hash. |
-| Mutual recursion | `hash.ts` | Strongly connected components are hashed as one group; members are `H(groupHash, i)`. |
+| Mutual recursion | `hash.ts`, `codebase.ts` | Strongly connected components are hashed as one group; members are `H(groupHash, i)`. Recursion is only allowed in `partial def`, and total code may not call partial code; `partial` is part of the hash. |
 | Exact impact analysis | `codebase.ts` | An edit's transitive dependents are found via a reverse index, converted back to name-form, re-type-checked against the new types, and re-hashed. Incompatible changes are rejected with every broken dependent named. |
 | Change classification | `codebase.ts` | Body-only, compatible type change (`new <: old`), or incompatible. Rehashes caused purely by a moved dependency are reported as propagated, not edited. |
 | Test cache by hash | `runtime.ts` | A test result is a permanent fact about a hash. A test's hash transitively covers its dependencies, so cache invalidation is exact. Reverting code gets back old hashes and therefore old results. |
@@ -189,6 +219,7 @@ src/
   store.ts      loading and atomic saving of the state file
   coverage.ts   coverage units, recorded per test and reported per definition
   mutation.ts   mutation testing: mutants, verdicts cached per (mutant, test), scores
+  risks.ts      where the guarantees stop: partial code, plugin boundaries, untested code
   config.ts     project settings from cairn.json (coverage and mutation policies)
   cli.ts        command line
 test/           unit tests (node:test)

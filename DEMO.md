@@ -14,39 +14,39 @@ impact of examples/v1.cairn:
   + total  #ab5b7c78  new
   + receipt  #1e02252e  new
   + applyTwice  #7466041e  new
-  + fact  #44e16842  new
-  + isEven  #e325cd66  new
-  + isOdd  #7cd1bb8d  new
+  + fact  #0b832814  new
+  + isEven  #5c57a799  new
+  + isOdd  #30a45385  new
   + subtotalWorks  #0086fa0c  new
   + feeIsOnePercent  #81ad3d13  new
   + totalAddsFee  #0dc58c04  new
   + receiptFormat  #6ebb5c46  new
   + extraFieldsOk  #398df5d5  new
   + lambdaInferred  #340f629b  new
-  + factorial  #f27e85cb  new
-  + parity  #99a19c70  new
+  + factorial  #832eaa71  new
+  + parity  #7ec94329  new
 
 tests: running 8 now, 0 cached
-    ✓ extraFieldsOk        RAN 0.39ms  (new test)
-    ✓ factorial            RAN 0.29ms  (new test)
-    ✓ feeIsOnePercent      RAN 0.05ms  (new test)
-    ✓ lambdaInferred       RAN 0.08ms  (new test)
-    ✓ parity               RAN 0.09ms  (new test)
-    ✓ receiptFormat        RAN 0.08ms  (new test)
+    ✓ extraFieldsOk        RAN 0.28ms  (new test)
+    ✓ factorial            RAN 0.26ms  (new test)
+    ✓ feeIsOnePercent      RAN 0.03ms  (new test)
+    ✓ lambdaInferred       RAN 0.06ms  (new test)
+    ✓ parity               RAN 0.13ms  (new test)
+    ✓ receiptFormat        RAN 0.07ms  (new test)
     ✓ subtotalWorks        RAN 0.01ms  (new test)
     ✓ totalAddsFee         RAN 0.01ms  (new test)
 coverage: 93% of changed definitions (13/14 units)
   isOdd (2/3): 'if n == 0' never true
-dev is now ns#9f7ff2e5
+dev is now ns#01bb4332
 
 $ cairn deploy
-deploy: dev ns#9f7ff2e5 → live (currently (empty))
+deploy: dev ns#01bb4332 → live (currently (empty))
   gate:
     ✓ extraFieldsOk        cached #398df5d5
-    ✓ factorial            cached #f27e85cb
+    ✓ factorial            cached #832eaa71
     ✓ feeIsOnePercent      cached #81ad3d13
     ✓ lambdaInferred       cached #340f629b
-    ✓ parity               cached #99a19c70
+    ✓ parity               cached #7ec94329
     ✓ receiptFormat        cached #6ebb5c46
     ✓ subtotalWorks        cached #0086fa0c
     ✓ totalAddsFee         cached #0dc58c04
@@ -55,7 +55,7 @@ deploy: dev ns#9f7ff2e5 → live (currently (empty))
   coverage: 93% of changed definitions (13/14 units)
     isOdd (2/3): 'if n == 0' never true
 
-ACCEPTED — atomic swap: live is now ns#9f7ff2e5
+ACCEPTED — atomic swap: live is now ns#01bb4332
 
 
 ────────────────────────────────────────────────────────
@@ -82,22 +82,22 @@ impact of examples/v3-min-fee.cairn:
   ↻ receiptFormat  #6ebb5c46 → #9977ae58  re-checked OK, rehashed (via receiptFormat ← receipt ← total ← fee)
 
 tests: running 4 now, 5 cached
-    ✓ feeIsOnePercent      RAN 0.28ms  (affected via feeIsOnePercent → fee)
-    ✓ minFeeApplies        RAN 0.12ms  (new test)
-    ✓ receiptFormat        RAN 0.14ms  (affected via receiptFormat → receipt → total → fee)
-    ✓ totalAddsFee         RAN 0.05ms  (affected via totalAddsFee → total → fee)
+    ✓ feeIsOnePercent      RAN 0.32ms  (affected via feeIsOnePercent → fee)
+    ✓ minFeeApplies        RAN 0.14ms  (new test)
+    ✓ receiptFormat        RAN 0.22ms  (affected via receiptFormat → receipt → total → fee)
+    ✓ totalAddsFee         RAN 0.03ms  (affected via totalAddsFee → total → fee)
 coverage: 100% of changed definitions (3/3 units)
-dev is now ns#2e350d69
+dev is now ns#e93af1a0
 
 $ cairn deploy
-deploy: dev ns#2e350d69 → live (currently ns#9f7ff2e5)
+deploy: dev ns#e93af1a0 → live (currently ns#01bb4332)
   gate:
     ✓ extraFieldsOk        cached #398df5d5
-    ✓ factorial            cached #f27e85cb
+    ✓ factorial            cached #832eaa71
     ✓ feeIsOnePercent      cached #e1603cc4
     ✓ lambdaInferred       cached #340f629b
     ✓ minFeeApplies        cached #11f65d3e
-    ✓ parity               cached #99a19c70
+    ✓ parity               cached #7ec94329
     ✓ receiptFormat        cached #9977ae58
     ✓ subtotalWorks        cached #0086fa0c
     ✓ totalAddsFee         cached #ad9cdf59
@@ -105,7 +105,7 @@ deploy: dev ns#2e350d69 → live (currently ns#9f7ff2e5)
   tests: 9 total — 0 ran, 9 served from cache
   coverage: 100% of changed definitions (3/3 units)
 
-ACCEPTED — atomic swap: live is now ns#2e350d69
+ACCEPTED — atomic swap: live is now ns#e93af1a0
 
 
 ────────────────────────────────────────────────────────
@@ -122,30 +122,30 @@ impact of examples/v4-bug.cairn:
   ↻ receiptFormat  #9977ae58 → #54cb5693  re-checked OK, rehashed (via receiptFormat ← receipt ← total ← fee)
 
 tests: running 4 now, 5 cached
-    ✗ feeIsOnePercent      RAN 0.32ms — evaluated to false  (affected via feeIsOnePercent → fee)
-    ✓ minFeeApplies        RAN 0.11ms  (affected via minFeeApplies → fee)
-    ✗ receiptFormat        RAN 0.15ms — evaluated to false  (affected via receiptFormat → receipt → total → fee)
-    ✗ totalAddsFee         RAN 0.05ms — evaluated to false  (affected via totalAddsFee → total → fee)
+    ✗ feeIsOnePercent      RAN 0.33ms — evaluated to false  (affected via feeIsOnePercent → fee)
+    ✓ minFeeApplies        RAN 0.12ms  (affected via minFeeApplies → fee)
+    ✗ receiptFormat        RAN 0.22ms — evaluated to false  (affected via receiptFormat → receipt → total → fee)
+    ✗ totalAddsFee         RAN 0.04ms — evaluated to false  (affected via totalAddsFee → total → fee)
   3 test(s) failing (feeIsOnePercent, receiptFormat, totalAddsFee): staged, but deploy will refuse until they pass
 coverage: 100% of changed definitions (3/3 units)
-dev is now ns#498eeec9
+dev is now ns#0629f7da
 
 $ cairn deploy
-deploy: dev ns#498eeec9 → live (currently ns#2e350d69)
+deploy: dev ns#0629f7da → live (currently ns#e93af1a0)
   gate:
     ✓ extraFieldsOk        cached #398df5d5
-    ✓ factorial            cached #f27e85cb
+    ✓ factorial            cached #832eaa71
     ✗ feeIsOnePercent      cached #992dbcd7
     ✓ lambdaInferred       cached #340f629b
     ✓ minFeeApplies        cached #f69f195e
-    ✓ parity               cached #99a19c70
+    ✓ parity               cached #7ec94329
     ✗ receiptFormat        cached #54cb5693
     ✓ subtotalWorks        cached #0086fa0c
     ✗ totalAddsFee         cached #21273940
   changes: +0 added, ~7 changed, -0 removed
   tests: 9 total — 0 ran, 9 served from cache
 
-REJECTED — 3 test(s) failed: feeIsOnePercent, receiptFormat, totalAddsFee. live unchanged at ns#2e350d69.
+REJECTED — 3 test(s) failed: feeIsOnePercent, receiptFormat, totalAddsFee. live unchanged at ns#e93af1a0.
 
 $ cairn eval fee({ qty: 100, price: 1 })
 1 : number
@@ -168,10 +168,10 @@ impact of examples/v5-revert.cairn:
   ↻ receiptFormat  #54cb5693 → #9977ae58  re-checked OK, rehashed (via receiptFormat ← receipt ← total ← fee)  [known hash]
 
 tests: 0 will run on next deploy, 9 cached
-dev is now ns#2e350d69
+dev is now ns#e93af1a0
 
 $ cairn deploy
-deploy: dev ns#2e350d69 → live (currently ns#2e350d69)
+deploy: dev ns#e93af1a0 → live (currently ns#e93af1a0)
   nothing to deploy: live already serves this exact namespace (same hash)
 
 
@@ -217,21 +217,21 @@ $ cairn view total
 #230576bb  def total(o: { price: number, qty: number }): number = subtotal(o) + commission(o)
 
 $ cairn deploy
-deploy: dev ns#bb5be816 → live (currently ns#2e350d69)
+deploy: dev ns#21a90592 → live (currently ns#e93af1a0)
   gate:
     ✓ extraFieldsOk        cached #398df5d5
-    ✓ factorial            cached #f27e85cb
+    ✓ factorial            cached #832eaa71
     ✓ feeIsOnePercent      cached #e1603cc4
     ✓ lambdaInferred       cached #340f629b
     ✓ minFeeApplies        cached #11f65d3e
-    ✓ parity               cached #99a19c70
+    ✓ parity               cached #7ec94329
     ✓ receiptFormat        cached #9977ae58
     ✓ subtotalWorks        cached #0086fa0c
     ✓ totalAddsFee         cached #ad9cdf59
   changes: +1 added, ~0 changed, -1 removed
   tests: 9 total — 0 ran, 9 served from cache
 
-ACCEPTED — atomic swap: live is now ns#bb5be816
+ACCEPTED — atomic swap: live is now ns#21a90592
 
 
 ────────────────────────────────────────────────────────
@@ -239,48 +239,48 @@ ACCEPTED — atomic swap: live is now ns#bb5be816
 
 $ cairn update examples/v7-loop.cairn
 impact of examples/v7-loop.cairn:
-  + settle  #154f3f53  new
-  + settleTerminates  #f366becb  new
+  + settle  #451715cf  new
+  + settleTerminates  #de485894  new
 
 tests: running 1 now, 9 cached
-    ✗ settleTerminates     RAN 9.41ms — stack overflow (possible infinite recursion)  (new test)
+    ✗ settleTerminates     RAN 9.54ms — stack overflow (possible infinite recursion)  (new test)
   1 test(s) failing (settleTerminates): staged, but deploy will refuse until they pass
 coverage: 67% of changed definitions (2/3 units)
   settle (2/3): 'if n == 0' never true
-dev is now ns#147941f7
+dev is now ns#e9822ee3
 
 $ cairn deploy
-deploy: dev ns#147941f7 → live (currently ns#bb5be816)
+deploy: dev ns#e9822ee3 → live (currently ns#21a90592)
   gate:
     ✓ extraFieldsOk        cached #398df5d5
-    ✓ factorial            cached #f27e85cb
+    ✓ factorial            cached #832eaa71
     ✓ feeIsOnePercent      cached #e1603cc4
     ✓ lambdaInferred       cached #340f629b
     ✓ minFeeApplies        cached #11f65d3e
-    ✓ parity               cached #99a19c70
+    ✓ parity               cached #7ec94329
     ✓ receiptFormat        cached #9977ae58
-    ✗ settleTerminates     cached #f366becb
+    ✗ settleTerminates     cached #de485894
     ✓ subtotalWorks        cached #0086fa0c
     ✓ totalAddsFee         cached #ad9cdf59
   changes: +2 added, ~0 changed, -0 removed
   tests: 10 total — 0 ran, 10 served from cache
 
-REJECTED — 1 test(s) failed: settleTerminates. live unchanged at ns#bb5be816.
+REJECTED — 1 test(s) failed: settleTerminates. live unchanged at ns#21a90592.
 
 
 ────────────────────────────────────────────────────────
 ## 9. Roll live back to the previous version
 
 $ cairn rollback
-rolled back live: ns#bb5be816 → ns#2e350d69
+rolled back live: ns#21a90592 → ns#e93af1a0
 
 $ cairn eval fee({ qty: 1, price: 1 })
 1 : number
 
 $ cairn status
 definitions in store: 32
-dev:  ns#147941f7  (19 names)
-live: ns#2e350d69  (17 names)
+dev:  ns#e9822ee3  (19 names)
+live: ns#e93af1a0  (17 names)
 deploy history: 1 previous version(s); cached test results: 17
 
 ```

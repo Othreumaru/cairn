@@ -11,6 +11,7 @@ import { parseConfig } from "../src/config.ts";
 import { coverage } from "../src/coverage.ts";
 import { mutants, mutation } from "../src/mutation.ts";
 import { runtimeFor } from "../src/host.ts";
+import { risks } from "../src/risks.ts";
 import { handle } from "../src/plugins/http.ts";
 import { frame, parseFrames, ws } from "../src/plugins/ws.ts";
 import { subtype } from "../src/types.ts";
@@ -93,8 +94,8 @@ test("renaming locals, reformatting and reordering record fields keep hashes sta
 
 test("mutually recursive definitions are hashed as a group and evaluate", () => {
   const s = fresh(`
-    def ev(n: number): boolean = if n == 0 then true else od(n - 1)
-    def od(n: number): boolean = if n == 0 then false else ev(n - 1)
+    partial def ev(n: number): boolean = if n == 0 then true else od(n - 1)
+    partial def od(n: number): boolean = if n == 0 then false else ev(n - 1)
     test p = ev(10) && od(3)`);
   const e1 = s.entries[s.dev.ev];
   const e2 = s.entries[s.dev.od];
@@ -104,10 +105,10 @@ test("mutually recursive definitions are hashed as a group and evaluate", () => 
 
 test("editing one member of a cycle rehashes its peer", () => {
   const s = fresh(`
-    def ev(n: number): boolean = if n == 0 then true else od(n - 1)
-    def od(n: number): boolean = if n == 0 then false else ev(n - 1)`);
+    partial def ev(n: number): boolean = if n == 0 then true else od(n - 1)
+    partial def od(n: number): boolean = if n == 0 then false else ev(n - 1)`);
   const before = s.dev.od;
-  const r = update(s, `def ev(n: number): boolean = if n <= 0 then true else od(n - 1)`);
+  const r = update(s, `partial def ev(n: number): boolean = if n <= 0 then true else od(n - 1)`);
   assert.ok(r.ok);
   assert.notEqual(s.dev.od, before);
   assert.equal(evaluate(s, "ev(4)", "dev").value, "true");
@@ -214,7 +215,7 @@ test("only affected tests run; reverting to known code is fully cached", () => {
 });
 
 test("non-terminating tests fail the gate instead of hanging it", () => {
-  const s = fresh(`def loop(n: number): number = loop(n + 1)
+  const s = fresh(`partial def loop(n: number): number = loop(n + 1)
                    test t = loop(0) == 0`);
   const r = deploy(s);
   assert.equal(r.accepted, false);
@@ -364,8 +365,8 @@ const api = () => {
     @http("GET /accounts/:id") def getAccount(req: { params: { id: string } }): { id: string, name: string } = account(req.params.id)
     @http("POST /double") def double(req: { body: { n: number } }): { n: number } = { n: req.body.n * 2 }
     @http("GET /search") def search(req: { query: { q: string } }): { q: string } = { q: req.query.q }
-    def loop(n: number): number = loop(n + 1)
-    @http("GET /loop") def spin(req: {}): number = loop(0)
+    partial def loop(n: number): number = loop(n + 1)
+    @http("GET /loop") partial def spin(req: {}): number = loop(0)
     test doubles = double({ body: { n: 2 } }).n == 4`);
   assert.ok(deploy(s).accepted);
   return s;
@@ -595,4 +596,60 @@ test("the deploy gate enforces a mutation minimum only when one is set", () => {
   assert.ok(off.accepted);
   assert.equal(off.mutation, undefined, "with no minimum, deploy does not run mutation testing");
   assert.deepEqual(parseConfig('{ "mutation": { "minimum": 70 } }').mutation, { minimum: 70, of: "changed" });
+});
+
+// ---------------- partial def ----------------
+
+test("recursion is only allowed in partial defs, and total code may not call partial code", () => {
+  const errs = (src: string) => update(emptyState(), src).fileErrors.map((e) => e.error);
+  assert.deepEqual(errs(`def fact(n: number): number = if n <= 1 then 1 else n * fact(n - 1)`), [
+    "'fact' calls itself, so it may not terminate: declare it 'partial def fact'",
+  ]);
+  assert.deepEqual(errs(`def a(n: number): number = b(n)
+                         def b(n: number): number = a(n)`), [
+    "'a' is mutually recursive with 'b', so it may not terminate: declare it 'partial def a'",
+    "'b' is mutually recursive with 'a', so it may not terminate: declare it 'partial def b'",
+  ]);
+  assert.deepEqual(errs(`partial def fact(n: number): number = if n <= 1 then 1 else n * fact(n - 1)
+                         def twice(n: number): number = fact(n) * 2`), [
+    "'twice' calls partial 'fact', and total code may not call partial code: declare it 'partial def twice'",
+  ]);
+  assert.deepEqual(errs(`partial def fact(n: number): number = if n <= 1 then 1 else n * fact(n - 1)
+                         partial def twice(n: number): number = fact(n) * 2
+                         test t = twice(3) == 12`), [], "tests may call partial code");
+});
+
+test("making a def partial is a change its total callers must follow, and nothing is applied until they do", () => {
+  const s = fresh(`def step(n: number): number = n + 1
+                   def twice(n: number): number = step(step(n))`);
+  const before = { ...s.dev };
+  const r = update(s, `partial def step(n: number): number = if n > 10 then n else step(n + 1)`);
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.fileErrors.map((e) => e.name), ["twice"]);
+  assert.deepEqual(s.dev, before);
+  assert.ok(update(s, `partial def step(n: number): number = if n > 10 then n else step(n + 1)
+                       partial def twice(n: number): number = step(step(n))`).ok);
+  assert.equal(view(s, s.dev, "twice"), "partial def twice(n: number): number = step(step(n))");
+  assert.ok(s.entries[s.dev.twice].partial);
+});
+
+test("risks lists partial code (and why), plugin boundaries and untested code, optionally only what changed", () => {
+  const s = fresh(`
+    partial def fact(n: number): number = if n <= 1 then 1 else n * fact(n - 1)
+    @http("GET /fact/:n") partial def factRoute(req: { params: { n: string } }): number = fact(3)
+    def double(n: number): number = n * 2
+    test factOk = fact(3) == 6`);
+  assert.equal(view(s, s.dev, "factRoute"), '@http("GET /fact/:n") partial def factRoute(req: { params: { n: string } }): number = fact(3)');
+  runTests(s, s.dev, {}, new Set());
+  const show = (rs: ReturnType<typeof risks>) => rs.map((r) => `${r.kind} ${r.name}: ${r.detail}`);
+  assert.deepEqual(show(risks(s, s.dev)), [
+    "partial fact: recursive",
+    "partial factRoute: calls partial fact",
+    'binding factRoute: @http("GET /fact/:n"): reached from trusted plugin code (http@1)',
+    "untested double: never run by any test",
+    "untested factRoute: never run by any test",
+  ]);
+  assert.ok(deploy(s).accepted);
+  update(s, `def triple(n: number): number = n * 3`);
+  assert.deepEqual(show(risks(s, s.dev, s.live)), ["untested triple: never run by any test"]);
 });

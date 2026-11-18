@@ -67,6 +67,7 @@ export type Decl = {
   span: Span;
   builtins?: Record<string, number>; // pinned builtin versions (set when rebuilt from the store); absent = current
   binding?: Binding; // set for `@plugin(...) def`; part of the hash
+  partial?: true; // `partial def`: may recurse, and so may not terminate; part of the hash
 };
 
 export class CairnError extends Error {

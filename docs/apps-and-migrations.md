@@ -131,6 +131,14 @@ The app architecture depends on features Cairn does not have yet.
      code does today, cannot be used in migrations, fixes, invariants or proved properties, and is
      visible in review and in the hash.
 
+   **Total code may not call partial code** (the rule Idris uses). A definition that calls a
+   `partial def`, directly or through others, must be marked `partial` itself, so the marker
+   appears everywhere the risk of not terminating reaches, not only where the recursion is
+   written. "Is this guaranteed to finish?" is answered by the declaration, and the guarantees
+   for migrations, invariants and proofs hold automatically, because they only accept total code.
+   Marking one deep function `partial` forces its callers to say so too; that is deliberate. Tests
+   are exempt: they always run under the evaluation budget and nothing is built on them.
+
    Removing recursion does not remove the need for induction: proving something about a `fold`
    over a list of any length still needs it. The gain is that induction happens in one place the
    language owns. The verifier knows the induction rule for `fold`, checked once, instead of facing
@@ -575,6 +583,15 @@ These fall out of the design with little extra work:
   definition, and each verdict is cached per (mutant, test), so the usual cost of mutation testing
   mostly disappears. A project can set a minimum score for the deploy gate. (Built in the
   prototype.)
+- **A risk report.** Every place Cairn's guarantees stop is explicit: `partial def` (may not
+  terminate), plugin bindings (trusted host code), `migration` and `fix` (permanent data changes),
+  properties only checked on samples, survived mutants, coverage gaps, and overrides such as
+  `--force`. Because all of it is structured data about hashes, `cairn risks` can list it for the
+  whole codebase or for one deploy, so a reviewer, human or AI, starts where the risk is rather than
+  reading every change equally. Reviews can be cached by hash too: "this partial function was
+  reviewed, and its loop terminates because X" is a statement about one hash, valid until the code
+  changes, like a test result. (`partial def` and a first `cairn risks` are built in the
+  prototype.)
 - **Canary deploys.** Send a percentage of requests to the new namespace: two pointers and a
   weighted choice. For stateful apps this has the same restriction as several majors.
 
@@ -870,7 +887,9 @@ keep their message types and are closed with 1012 when a deploy changes them). P
 codebase only through a `Runtime` the host provides. Instances follow a shared state file saved by
 atomic rename, so one deploy switches every instance in milliseconds (`examples/serve-demo.sh`).
 Test coverage and mutation testing (section 8) are built: both are cached per hash and can be
-enforced by the deploy gate through `cairn.json`.
+enforced by the deploy gate through `cairn.json`. `partial def` is built, with the rule that total
+code may not call partial code, and a first `cairn risks` (partial code, plugin boundaries,
+untested code); without lists and `fold` yet, all recursion is `partial` for now.
 Not yet built: logical resources and per-environment config (ports are command-line flags),
 pinning plugins by package hash and upgrading pinned plugin versions, `Reply`/`Await`, the store
 split, and compare-and-swap between concurrent deployers.
