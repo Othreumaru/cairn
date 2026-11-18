@@ -50,7 +50,8 @@ These are the foundations everything below builds on:
   classification of type changes.
 - Affected tests run when code is staged; results are cached by hash, so a deploy only reads
   the cache.
-- Builtins are versioned, so a hash fully determines behaviour.
+- Builtins are versioned and pinned in hashes. (Item 8 of section 1 extends this to the language's
+  own semantics, so that a hash fully determines behaviour.)
 - Recursion groups are detected and hashed together (`Entry.group`).
 
 ## 1. Language prerequisites
@@ -195,6 +196,40 @@ The app architecture depends on features Cairn does not have yet.
    functions such as `sin` or `exp`, which JavaScript engines may round differently, so a Node
    upgrade could change a result and invalidate a cached fact. Such functions are Cairn's own
    versioned builtins, pinned like `round2`, never passed straight through to `Math`.
+
+8. **The language's own semantics are versioned**, so a hash keeps fully determining behaviour
+   when the evaluator or checker changes. A hash covers a definition's code, builtin versions and
+   plugin versions; without this, a change to how code runs or what the checker accepts would make
+   the same hash behave differently and every cached fact silently untrue. Step 1 is the first such
+   change: `/` stops returning `Infinity` and starts returning a `Result`.
+
+   Semantics are versioned at the smallest unit that changes, in two layers:
+
+   - **Operators are versioned builtins.** `/`, `%`, `+`, `==` and the rest are recorded in the hash
+     as `round2@1` is. `/@1` (returns `Infinity`) and `/@2` (returns a `Result`) are two versions:
+     only code that uses `/` is affected, `cairn upgrade` moves it over and re-checks it against
+     the new typing rule (refusing if callers break), and affected tests re-run, as for builtins
+     today. An operator's typing rule is part of its version, so checker changes for operators are
+     covered too.
+   - **Editions** cover changes that are not one operator: evaluation order, record equality,
+     subtyping rules. Every definition records its edition in its hash, as Rust records an edition
+     per crate. Editions change rarely, definitions of different editions work together, and moving
+     to a new edition is an explicit `cairn upgrade --edition`.
+
+   Rules that make it hold:
+
+   - **A runtime refuses code it cannot run faithfully**: an operator version or edition it does not
+     support, the same rule as refusing a plugin whose package hash does not match.
+   - **Old versions are kept**, like old builtin versions, so stored code, rollback targets and other
+     repositories keep working.
+   - **Any observable change gets a new version, bug fixes included.** If fixing an evaluator bug
+     changes a result, that is a new operator version or edition, not a silent patch.
+   - **Cairn's own cache checks a new runtime.** Before a runtime release, stored tests run under it,
+     and every result must match its cached fact; an accidental change in semantics shows up as a
+     mismatch.
+
+   Existing code is **edition 1** with `/@1`. Like bindings and `partial`, the edition is only
+   recorded in the hash when it is not edition 1, so existing hashes do not change.
 
 ## 2. Apps
 
@@ -1207,7 +1242,9 @@ split, and compare-and-swap between concurrent deployers.
    exactly rounded `sum`, and the number rules (`NonZero`, with non-zero literals
    typed `NonZero`; division returning `Result` unless the divisor is a `NonZero`; overflow as an
    error). Then restricted recursion: structural recursion and `partial def`, with existing
-   recursive examples rewritten with `fold` or marked `partial`.
+   recursive examples rewritten with `fold` or marked `partial`. Before the semantic changes:
+   operators as versioned builtins and editions (item 8), so existing code keeps `/@1` until
+   upgraded, plus the check that a new runtime reproduces cached results.
 2. Stateless HTTP routes with typed requests (path parameters, query, body), `cairn serve`,
    request checking and response projection, per-request evaluation budgets, the
    `X-Cairn-Namespace` header; the store split; instant deploys across several local instances.
@@ -1300,11 +1337,10 @@ A. **How app code reads and writes data is undefined.** There are three state mo
    a projection a pure input like the `model`, or a command? Who writes with `put`, and how does it
    interact with migrations and rollback? Needed before step 5; the open question "Plain `Model` as
    a log" is part of it.
-B. **The core language's semantics are not versioned.** Builtins and plugins are pinned, but the
-   evaluator and checker are not, so "a hash fully determines behaviour" only holds while they never
-   change. Step 1 changes semantics (division), which would leave cached facts describing the old
-   behaviour and stored code that no longer type-checks. Likely direction: a language version in
-   hashes or cache keys, with an upgrade path like `cairn upgrade`.
+B. *Resolved (section 1, item 8):* the core language's semantics were not versioned. Operators are
+   now versioned builtins and cross-cutting changes are editions, both recorded in hashes; runtimes
+   refuse versions they do not support, old versions are kept, any observable change (bug fixes
+   included) is a new version, and a new runtime must reproduce cached results.
 C. **Effects and crashes.** Commands run after the new state is stored, so a crash between the two
    loses or repeats them; exactly-once holds for state, not for external effects. Likely direction:
    store pending commands atomically with the state (an outbox), with idempotency keys in plugins.
