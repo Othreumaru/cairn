@@ -149,19 +149,47 @@ The app architecture depends on features Cairn does not have yet.
    This also turns section 4's rule that migrations must terminate from a special case into the
    general rule.
 
-7. **An exact number type** is needed before the solver reasons about numbers (section 11).
-   Cairn's numbers are JavaScript floats, where `0.1 + 0.2 != 0.3`. A solver either treats them as
-   exact reals, which is unsound for rounding, or models IEEE floats precisely, which is slow. An
-   exact decimal (or integer) type, at least for money-like values, keeps proofs both sound and
-   fast. Which one is an open question.
+7. **Two number types: `number` and `decimal`.** Cairn's numbers are JavaScript floats, where
+   `0.1 + 0.2 != 0.3`. An "associative float" cannot exist: floats have fixed precision, so every
+   operation rounds, and rounding is what breaks associativity. So rather than two kinds of float,
+   Cairn has a float and an exact type, with different jobs:
 
-   Each number type carries **fixed, built-in algebraic laws**; users do not declare them. For an
-   exact type, `+` and `*` are commutative and associative. For floats, they are commutative but
-   **not associative**: `(0.1 + 0.2) + 0.3 != 0.1 + (0.2 + 0.3)`. That matters beyond proofs: if
-   Cairn ever reordered or parallelised a sum of floats, the result could change from run to run,
-   and a test result would no longer be a permanent fact about a hash. Reordering is therefore
-   only allowed where the laws permit it (section 11, "Algebraic laws"), which is one more reason
-   for the exact type.
+   | | `number` | `decimal` |
+   |---|---|---|
+   | What it is | 64-bit float, identical to JavaScript | exact, unlimited precision |
+   | For | measurements, science, ratios, interop | money, counts, anything that must add up exactly |
+   | `+` `-` `*` | commutative, **not** associative | exact, commutative and associative |
+   | Division | `Result` unless the divisor is a `NonZero` (item 5) | the same, plus an explicit rounding rule, since `1 / 3` has no exact decimal: `divide(a, b, places: 2, rounding: halfEven)` |
+   | Solver | slow to reason about precisely; treated as exact reals it would be unsound | fast and sound |
+
+   Rules that keep the two honest:
+
+   - **No silent mixing.** Conversion is explicit both ways: `toDecimal(x, places: 2)` rounds
+     visibly, and `toNumber(d)` may lose precision visibly. Neither type is a subtype of the other.
+   - **Literals take their type from context**, which bidirectional checking already provides:
+     `price: decimal = 1.10` is exact, with no suffix in typed positions. Non-zero literals of
+     either type are `NonZero`.
+   - **Plugins decide how `decimal` crosses their boundary** (section 9): the `http` plugin sends it
+     as a JSON string such as `"12.50"`, as money APIs commonly do because JSON numbers are floats;
+     a SQL plugin stores it as `NUMERIC`.
+
+   Each type carries **fixed, built-in algebraic laws**; users do not declare them (`decimal`: `+`
+   and `*` commutative and associative; `number`: commutative only, since
+   `(0.1 + 0.2) + 0.3 != 0.1 + (0.2 + 0.3)`). This matters beyond proofs: if Cairn reordered or
+   parallelised a sum of floats, the result could change from run to run, and a test result would
+   no longer be a permanent fact about a hash. Reordering is only allowed where the laws permit it
+   (section 11, "Algebraic laws").
+
+   Floats are already deterministic as long as nothing reorders them, and a plain `fold` does not.
+   For the common case that wants reordering, summing a list, there is a built-in **exactly
+   rounded `sum(xs)`** (as in Python's `math.fsum`): it accumulates the exact total and rounds
+   once at the end, so its result is the same in any order even though `+` is not associative. It
+   may be used in unordered and parallel folds; plain `+` on floats may not.
+
+   One caveat: IEEE 754 guarantees identical results for `+ - * /` and square root, but not for
+   functions such as `sin` or `exp`, which JavaScript engines may round differently, so a Node
+   upgrade could change a result and invalidate a cached fact. Such functions are Cairn's own
+   versioned builtins, pinned like `round2`, never passed straight through to `Math`.
 
 ## 2. Apps
 
@@ -629,6 +657,7 @@ A plugin receives the declared type and decides what it means in its world:
 | `http` | a JSON body, checked on the way in and projected on the way out, plus an OpenAPI schema |
 | `sql` storage | a table `(id TEXT PRIMARY KEY, qty REAL)`, plus the `ALTER TABLE` when the type changes |
 | `file` storage | a JSON file, written atomically |
+| `http`, a `decimal` field | a JSON string such as `"12.50"`, since JSON numbers are floats |
 | `ws` | a typed message format on a channel |
 
 A plugin can **reject types it cannot handle at `update` time**: a SQL plugin may refuse nested
@@ -916,7 +945,8 @@ all of the benefit without that machinery.
 
 - **Mandatory proofs by default**, for the same reasons as mandatory 100% coverage: deploys would be
   blocked by solver limits and specification work.
-- **Solver reasoning over floats** before an exact number type exists (section 1, item 7).
+- **Solver reasoning over floats**: properties about money-like values should use `decimal`,
+  where proofs are fast and sound (section 1, item 7).
 
 ## Implementation order
 
@@ -937,7 +967,8 @@ pinning plugins by package hash and upgrading pinned plugin versions, `Reply`/`A
 split, and compare-and-swap between concurrent deployers.
 
 1. Tagged unions with `case`, lists with `fold` and `range`, the built-in parameterized types, type
-   aliases (including recursive types), and the number rules (`NonZero`, with non-zero literals
+   aliases (including recursive types), `decimal` beside `number` with explicit conversions, the
+   exactly rounded `sum`, and the number rules (`NonZero`, with non-zero literals
    typed `NonZero`; division returning `Result` unless the divisor is a `NonZero`; overflow as an
    error). Then restricted recursion: structural recursion and `partial def`, with existing
    recursive examples rewritten with `fold` or marked `partial`.
@@ -962,8 +993,8 @@ split, and compare-and-swap between concurrent deployers.
     share the same `Model` type.
 11. Verification: `property` declarations with property testing first (generators from types,
     counterexamples kept as tests); then the solver behind them, with proofs cached and the solver
-    pinned; then proved `Model` invariants and migration properties; refinement types once the
-    exact number type exists. Declared algebraic laws (`laws f: commutative, ...`), checked like
+    pinned; then proved `Model` invariants and migration properties; refinement types, starting
+    with `decimal`. Declared algebraic laws (`laws f: commutative, ...`), checked like
     properties, and an unordered `fold` that requires them.
 
 ## Open questions
@@ -980,8 +1011,5 @@ split, and compare-and-swap between concurrent deployers.
 - **Plugin distribution and sandboxing.** Plugins are pinned by package hash (section 9). How are
   they packaged and fetched, and is sandboxing (for example, running plugins in a separate process
   with only the capabilities they declare) worth it later?
-- **The exact number type.** A decimal type (exact for money, familiar from SQL), integers plus
-  exact rationals, or both? And does it replace `number`, or sit beside it with floats kept for
-  measurements?
 - **Expired results.** Should a command result that arrives after its horizon be dropped silently
   (and logged), or delivered as a typed `Expired` value that code must handle?
