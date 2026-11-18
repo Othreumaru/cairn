@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CairnError, T } from "../src/ast.js";
+import { BUILTINS, BuiltinVersion } from "../src/builtins.js";
 import { Checker } from "../src/check.js";
-import { emptyState, update, rename, remove, view } from "../src/codebase.js";
+import { emptyState, staleBuiltins, update, upgrade, rename, remove, view } from "../src/codebase.js";
 import { parseExpr, parseProgram } from "../src/parser.js";
 import { showDecl, showExpr } from "../src/pretty.js";
-import { deploy, evaluate, rollback } from "../src/runtime.js";
+import { deploy, evaluate, rollback, runTests } from "../src/runtime.js";
 import { subtype } from "../src/types.js";
 
 const synth = (src: string) => new Checker(() => undefined).synth(parseExpr(src), new Map());
@@ -223,4 +224,128 @@ test("rollback restores the previous live namespace", () => {
   rollback(s);
   assert.equal(evaluate(s, "v").value, "1");
   assert.throws(() => rollback(s), CairnError);
+});
+
+test("tests run when code is staged, so deploy only reads the cache", () => {
+  const s = fresh(`def a(x: number): number = x + 1
+                   def c(x: number): number = x - 1
+                   test ta = a(1) == 2
+                   test tc = c(1) == 0`);
+  assert.ok(deploy(s).accepted);
+  const prev = { ...s.dev };
+  update(s, `def a(x: number): number = 1 + x`);
+  const ran = runTests(s, s.dev, prev, new Set(["a", "ta"])).filter((r) => !r.cached);
+  assert.deepEqual(
+    ran.map((r) => [r.name, r.why]),
+    [["ta", ["ta", "a"]]],
+  );
+  const d = deploy(s);
+  assert.ok(d.accepted);
+  assert.ok(d.runs.every((r) => r.cached), "nothing left to run at deploy time");
+});
+
+test("a test failing at staging time is still staged, and deploy refuses without re-running it", () => {
+  const s = fresh(`def fee(x: number): number = x * 0.01
+                   test t = fee(100) == 1`);
+  assert.ok(deploy(s).accepted);
+  const prev = { ...s.dev };
+  const r = update(s, `def fee(x: number): number = x * 0.1`);
+  assert.ok(r.applied);
+  const [run] = runTests(s, s.dev, prev, new Set(["fee", "t"]));
+  assert.equal(run.result.passed, false);
+  const d = deploy(s);
+  assert.equal(d.accepted, false);
+  assert.ok(d.runs.every((x) => x.cached));
+  assert.equal(evaluate(s, "fee(100)").value, "1", "live unchanged");
+});
+
+// ---------------- versioned builtins ----------------
+
+/** Publish a new version of a builtin for the duration of `fn`. */
+function withNewBuiltin(name: string, next: Partial<BuiltinVersion>, fn: () => void) {
+  const b = BUILTINS[name];
+  const prev = b.current;
+  b.versions[prev + 1] = { ...b.versions[prev], ...next };
+  b.current = prev + 1;
+  try {
+    fn();
+  } finally {
+    b.current = prev;
+    delete b.versions[prev + 1];
+  }
+}
+const floor2 = (n: number) => Math.floor(n * 100) / 100;
+
+test("a builtin's version is part of the hash of code that uses it", () => {
+  const src = `def r(x: number): number = round2(x)
+               def p(x: number): number = x + 1`;
+  const s1 = fresh(src);
+  withNewBuiltin("round2", { impl: floor2 }, () => {
+    const s2 = fresh(src);
+    assert.notEqual(s2.dev.r, s1.dev.r);
+    assert.equal(s2.dev.p, s1.dev.p);
+  });
+});
+
+test("a new builtin version does not change stored code until it is upgraded", () => {
+  const s = fresh(`def r(x: number): number = round2(x)
+                   test t = r(1.236) == 1.24`);
+  assert.ok(deploy(s).accepted);
+  withNewBuiltin("round2", { impl: floor2 }, () => {
+    assert.equal(evaluate(s, "r(1.236)").value, "1.24", "stored code keeps running round2@1");
+    assert.equal(evaluate(s, "round2(1.236)").value, "1.23", "new code gets round2@2");
+    assert.deepEqual(staleBuiltins(s.entries[s.dev.r]), ["round2@1→2"]);
+  });
+});
+
+test("upgrade rehashes stale code and its dependents, so exactly the affected tests run", () => {
+  const s = fresh(`
+    def r(x: number): number = round2(x)
+    def wrap(x: number): number = r(x) + 0
+    def plain(x: number): number = x + 1
+    test tr = wrap(1.236) == 1.24
+    test tp = plain(1) == 2`);
+  assert.ok(deploy(s).accepted);
+  withNewBuiltin("round2", { impl: floor2 }, () => {
+    const u = upgrade(s);
+    assert.ok(u.ok);
+    const byName = Object.fromEntries(u.changes.map((c) => [c.name, c.kind]));
+    assert.deepEqual(byName.r, { k: "upgraded", builtins: ["round2@1→2"] });
+    assert.deepEqual(byName.wrap, { k: "propagated", via: ["wrap", "r"] });
+    assert.deepEqual(u.testsToRun, ["tr"]);
+    assert.deepEqual(u.testsCached, ["tp"]);
+    const d = deploy(s);
+    assert.deepEqual(
+      d.runs.filter((x) => !x.cached).map((x) => x.name),
+      ["tr"],
+    );
+    assert.equal(d.accepted, false, "the behaviour change is caught by the gate");
+    assert.equal(evaluate(s, "wrap(1.236)").value, "1.24", "live still serves round2@1");
+  });
+});
+
+test("rehashing a dependent for an unrelated edit keeps its pinned builtin version", () => {
+  const s = fresh(`def k(x: number): number = x
+                   def u(x: number): number = round2(k(x))`);
+  withNewBuiltin("round2", { impl: floor2 }, () => {
+    const r = update(s, `def k(x: number): number = x + 0`);
+    assert.ok(r.ok);
+    assert.equal(r.changes.find((c) => c.name === "u")!.kind.k, "propagated");
+    assert.deepEqual(staleBuiltins(s.entries[s.dev.u]), ["round2@1→2"]);
+    assert.equal(evaluate(s, "u(1.236)", "dev").value, "1.24");
+  });
+});
+
+test("upgrade is rejected when a new builtin type breaks a caller", () => {
+  const s = fresh(`def r(x: number): number = round2(x)`);
+  const before = { ...s.dev };
+  withNewBuiltin("round2", { type: T.fn([T.string], T.number) }, () => {
+    const u = upgrade(s);
+    assert.equal(u.ok, false);
+    assert.deepEqual(
+      u.fileErrors.map((e) => e.name),
+      ["r"],
+    );
+    assert.deepEqual(s.dev, before, "nothing applied");
+  });
 });

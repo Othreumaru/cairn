@@ -4,7 +4,7 @@ A toy language exploring three ideas together:
 
 1. **Content-addressed code** (Unison-style): every definition is identified by the hash of its normalised AST, not by its name.
 2. **Static change-impact analysis**: because dependencies are by hash, the exact set of code affected by an edit is a graph query, and it is type-checked before anything is staged.
-3. **A runtime with a deploy gate**: tests run *inside the runtime* before a deploy, results are cached by hash (so only affected tests run), and a passing deploy is an atomic pointer swap with rollback.
+3. **A runtime with a deploy gate**: tests run *inside the runtime* as soon as code is staged, results are cached by hash (so only affected tests run), and a deploy only reads those results: if they all pass, it is an atomic pointer swap with rollback.
 
 The surface language is a small, JS-flavoured, pure functional language with closed, immutable records, structural subtyping and bidirectional type checking.
 
@@ -24,7 +24,7 @@ Requires Node 18+.
 
 ```sh
 npm install
-npm test               # 21 unit tests
+npm test               # 28 unit tests
 sh examples/demo.sh    # end-to-end walkthrough (output also in DEMO.md)
 ./cairn                # CLI help
 ```
@@ -33,11 +33,12 @@ The workflow is the Unison "scratch file" model: a source file holds only what y
 
 ```sh
 ./cairn update examples/v1.cairn          # type-check, hash, show impact, stage into dev
-./cairn update examples/v3-min-fee.cairn  # edit one definition; dependents are re-checked
-./cairn deploy                            # gate: run affected tests, then swap live
+./cairn update examples/v3-min-fee.cairn  # edit one definition; dependents are re-checked, affected tests run now
+./cairn deploy                            # gate: all cached results pass? then swap live
 ./cairn eval 'fee({ qty: 100, price: 1 })'
 ./cairn dependents subtotal               # blast radius of a change, before you make it
 ./cairn rename fee commission             # free: no hash changes, no tests run
+./cairn upgrade                           # move code onto new builtin versions; affected tests re-run
 ./cairn rollback
 ```
 
@@ -55,8 +56,9 @@ State lives in `./.cairn/state.json` (override with `CAIRN_HOME`).
 | Exact impact analysis | `codebase.ts` | An edit's transitive dependents are found via a reverse index, converted back to name-form, re-type-checked against the new types, and re-hashed. Incompatible changes are rejected with every broken dependent named. |
 | Change classification | `codebase.ts` | Body-only, compatible type change (`new <: old`), or incompatible. Rehashes caused purely by a moved dependency are reported as propagated, not edited. |
 | Test cache by hash | `runtime.ts` | A test result is a permanent fact about a hash. A test's hash transitively covers its dependencies, so cache invalidation is exact. Reverting code gets back old hashes and therefore old results. |
-| Deploy gate | `runtime.ts` | `live` is only written by `deploy`: all tests must pass (cached or freshly run), then the namespace pointer is swapped atomically. |
+| Deploy gate | `runtime.ts`, `cli.ts` | `live` is only written by `deploy`: all tests must pass, then the namespace pointer is swapped atomically. `update` runs the affected tests as soon as code is staged (failing ones are still staged, but block the deploy), so a deploy normally only reads the cache and does no work. `--skip-tests` defers them to the deploy. |
 | Rollback | `runtime.ts` | The previous namespace is just another pointer, and the code it refers to is still in the append-only store. |
+| Versioned builtins | `builtins.ts`, `hash.ts`, `codebase.ts` | Builtins are immutable and versioned; hash-form code pins `name@version`, so a builtin's version is part of every hash that uses it. Publishing a new version changes nothing stored: old code (and rollback targets) keep running the old version. `upgrade` re-hashes the code still pinned to an old version, propagates to dependents, and the next deploy re-runs exactly the tests that reach the changed builtin. Code re-hashed for an unrelated edit keeps its pins. |
 | Runaway tests | `eval.ts`, `runtime.ts` | Evaluation budget plus stack-overflow capture: a non-terminating test fails the gate instead of hanging it. |
 
 ## Source layout

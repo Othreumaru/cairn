@@ -37,7 +37,7 @@ export type Expr =
   | { t: "var"; name: string; span?: Span }
   | { t: "ref"; hash: string; span?: Span } // hash-form only
   | { t: "cref"; index: number; span?: Span } // hash-form only
-  | { t: "builtin"; name: string; span?: Span } // hash-form only
+  | { t: "builtin"; name: string; v: number; span?: Span } // hash-form only; `v` pins the builtin's version
   | { t: "lam"; params: Param[]; body: Expr; span?: Span }
   | { t: "call"; fn: Expr; args: Expr[]; span?: Span }
   | { t: "field"; obj: Expr; name: string; span?: Span }
@@ -56,6 +56,7 @@ export type Decl = {
   sig: Type; // tests always have sig = boolean
   body: Expr;
   span: Span;
+  builtins?: Record<string, number>; // pinned builtin versions (set when rebuilt from the store); absent = current
 };
 
 export class CairnError extends Error {

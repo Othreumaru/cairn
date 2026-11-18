@@ -7,7 +7,7 @@ C=./cairn
 step() { printf '\n────────────────────────────────────────────────────────\n## %s\n\n' "$1"; }
 run() { printf '$ cairn %s\n' "$*"; $C "$@"; echo; }
 
-step "1. Load v1 and deploy it (every test is new, so all run)"
+step "1. Load v1 (every test is new, so all run as it is staged) and deploy it from the cache"
 run update examples/v1.cairn
 run deploy
 
@@ -18,7 +18,7 @@ step "3. Edit one definition; the codebase finds every dependent and re-checks i
 run update examples/v3-min-fee.cairn
 run deploy
 
-step "4. A typo that type-checks: the deploy gate runs the 4 affected tests and rejects it"
+step "4. A typo that type-checks: staging runs the 4 affected tests, and the gate rejects it from the cache"
 run update examples/v4-bug.cairn
 run deploy
 run eval 'fee({ qty: 100, price: 1 })'

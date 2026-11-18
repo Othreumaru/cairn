@@ -3,7 +3,7 @@ import { Checker } from "./check.js";
 import { invert, Namespace, nsId, State, TestResult } from "./codebase.js";
 import { Evaluator, showValue } from "./eval.js";
 import { normalize, short } from "./hash.js";
-import { BUILTINS } from "./builtins.js";
+import { BUILTINS, currentVersion } from "./builtins.js";
 import { parseExpr } from "./parser.js";
 import { showType } from "./pretty.js";
 
@@ -11,6 +11,8 @@ import { showType } from "./pretty.js";
  * The runtime owns the `live` namespace. Nothing reaches it except through `deploy`, and
  * `deploy` is a gate: every test in the candidate namespace must pass. Results are cached
  * by test hash, so only tests whose transitive code actually changed are executed.
+ * `update` normally runs those tests as soon as code is staged (see `runTests`), so by the
+ * time of a deploy every result is already cached and the gate only reads the cache.
  * Passing the gate is an atomic pointer swap; rollback swaps the previous pointer back.
  */
 
@@ -73,6 +75,42 @@ function whyAffected(state: State, ns: Namespace, test: string, touched: Set<str
   return bfs(roots) ?? bfs(touched);
 }
 
+/**
+ * Every test in `ns`, with its result: cached results are reused, the rest are run and cached.
+ * A result is a permanent fact about a hash, so it does not matter whether it is computed
+ * when code is staged or when it is deployed.
+ *
+ * @param prev     the namespace `ns` is replacing: tests not in it are reported as new
+ * @param touched  names added or changed since `prev`, to explain why a test had to run
+ */
+export function runTests(
+  state: State,
+  ns: Namespace,
+  prev: Namespace,
+  touched: Set<string>,
+  onRun?: (r: TestRun) => void,
+): TestRun[] {
+  const runs: TestRun[] = [];
+  const tests = Object.keys(ns)
+    .filter((n) => state.entries[ns[n]].kind === "test")
+    .sort();
+  for (const name of tests) {
+    const h = ns[name];
+    const cachedResult = state.testCache[h];
+    let run: TestRun;
+    if (cachedResult) run = { name, hash: h, result: cachedResult, cached: true };
+    else {
+      const result = runTest(state, h);
+      state.testCache[h] = result; // a result is a permanent fact about this hash
+      const isNew = !(name in prev);
+      run = { name, hash: h, result, cached: false, why: isNew ? undefined : whyAffected(state, ns, name, touched) };
+    }
+    runs.push(run);
+    onRun?.(run);
+  }
+  return runs;
+}
+
 export function deploy(state: State, opts: { onRun?: (r: TestRun) => void } = {}): DeployReport {
   const staged = state.dev;
   const live = state.live ?? {};
@@ -89,25 +127,8 @@ export function deploy(state: State, opts: { onRun?: (r: TestRun) => void } = {}
     return report;
   }
 
-  const touched = new Set([...added, ...changed]);
-  const tests = Object.keys(staged)
-    .filter((n) => state.entries[staged[n]].kind === "test")
-    .sort();
-
-  for (const name of tests) {
-    const h = staged[name];
-    const cachedResult = state.testCache[h];
-    let run: TestRun;
-    if (cachedResult) run = { name, hash: h, result: cachedResult, cached: true };
-    else {
-      const result = runTest(state, h);
-      state.testCache[h] = result; // a result is a permanent fact about this hash
-      const isNew = !(name in live);
-      run = { name, hash: h, result, cached: false, why: isNew ? undefined : whyAffected(state, staged, name, touched) };
-    }
-    report.runs.push(run);
-    opts.onRun?.(run);
-  }
+  // Normally every result is already cached by `update`; anything staged with --skip-tests runs here.
+  report.runs = runTests(state, staged, live, new Set([...added, ...changed]), opts.onRun);
 
   const failed = report.runs.filter((r) => !r.result.passed);
   if (failed.length) {
@@ -139,7 +160,7 @@ export function evaluate(state: State, src: string, which: "live" | "dev" = "liv
   const type = checker.synth(e, new Map());
   const hashForm = normalize(e, (n) => {
     if (n in ns) return { t: "ref", hash: ns[n] };
-    if (n in BUILTINS) return { t: "builtin", name: n };
+    if (n in BUILTINS) return { t: "builtin", name: n, v: currentVersion(n) };
     throw new CairnError(`unknown name '${n}'`);
   });
   const ev = new Evaluator((h) => state.entries[h]);

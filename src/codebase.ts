@@ -1,7 +1,7 @@
 import { CairnError, Decl, Type } from "./ast.js";
-import { BUILTINS } from "./builtins.js";
+import { BUILTINS, currentVersion } from "./builtins.js";
 import { Checker } from "./check.js";
-import { canon, denormalize, Entry, hashDecls, normalize, sha, short } from "./hash.js";
+import { builtinsUsed, canon, denormalize, Entry, hashDecls, normalize, sha, short } from "./hash.js";
 import { parseProgram } from "./parser.js";
 import { showDecl, showType } from "./pretty.js";
 import { subtype, typeEq } from "./types.js";
@@ -67,6 +67,24 @@ export function view(state: State, ns: Namespace, name: string): string {
   return showDecl(declOf(state, ns, name));
 }
 
+/** Builtin versions an entry was hashed against that are no longer current, e.g. `round2@1→2`. */
+export function staleBuiltins(entry: Entry): string[] {
+  return Object.entries(builtinsUsed(entry.body))
+    .filter(([n, v]) => v !== currentVersion(n))
+    .map(([n, v]) => `${n}@${v}→${currentVersion(n)}`)
+    .sort();
+}
+
+/** Builtins whose pinned version differs between two hashings of the same definition. */
+function builtinChanges(before: Entry, after: Entry): string[] {
+  const a = builtinsUsed(before.body);
+  const b = builtinsUsed(after.body);
+  return Object.keys(b)
+    .filter((n) => n in a && a[n] !== b[n])
+    .map((n) => `${n}@${a[n]}→${b[n]}`)
+    .sort();
+}
+
 // ---------------------------------------------------------------------------
 // The update pipeline: parse -> check -> hash -> find dependents -> re-check -> report
 
@@ -74,7 +92,8 @@ export type ChangeKind =
   | { k: "new" }
   | { k: "alias"; of: string }
   | { k: "unchanged" }
-  | { k: "modified"; typeChange: "none" | "compatible" | "incompatible"; oldType: Type; newType: Type }
+  | { k: "modified"; typeChange: "none" | "compatible" | "incompatible"; oldType: Type; newType: Type; builtins: string[] }
+  | { k: "upgraded"; builtins: string[] } // same source, rehashed onto newer builtin versions
   | { k: "propagated"; via: string[] }
   | { k: "broken"; error: string; via: string[] };
 
@@ -90,7 +109,25 @@ export type UpdateReport = {
 };
 
 export function update(state: State, source: string, opts: { dryRun?: boolean } = {}): UpdateReport {
-  const decls = parseProgram(source);
+  return updateDecls(state, parseProgram(source), opts);
+}
+
+/**
+ * Move every definition still pinned to an old builtin version onto the current one.
+ * The stale definitions go through the normal update pipeline as if they had been
+ * re-submitted unchanged, so their dependents are re-checked and rehashed, and the next
+ * deploy re-runs exactly the tests that reach an upgraded builtin.
+ */
+export function upgrade(state: State, opts: { dryRun?: boolean } = {}): UpdateReport {
+  const stale = Object.keys(state.dev).filter((n) => staleBuiltins(state.entries[state.dev[n]]).length);
+  return updateDecls(
+    state,
+    stale.map((n) => ({ ...declOf(state, state.dev, n), builtins: undefined })),
+    opts,
+  );
+}
+
+function updateDecls(state: State, decls: Decl[], opts: { dryRun?: boolean }): UpdateReport {
   const report: UpdateReport = { ok: true, changes: [], fileErrors: [], testsToRun: [], testsCached: [], applied: false };
 
   const seen = new Set<string>();
@@ -106,11 +143,11 @@ export function update(state: State, source: string, opts: { dryRun?: boolean } 
   // --- Pass A: check & hash the file on its own, to learn which names really changed.
   const checkAll = (ws: Decl[]) => {
     const wsSigs = new Map(ws.map((d) => [d.name, d.sig]));
-    const checker = new Checker((n) => wsSigs.get(n) ?? (n in dev ? state.entries[dev[n]].sig : undefined));
+    const globals = (n: string) => wsSigs.get(n) ?? (n in dev ? state.entries[dev[n]].sig : undefined);
     const errors = new Map<string, CairnError>();
     for (const d of ws) {
       try {
-        checker.check(d.body, d.sig, new Map());
+        new Checker(globals, d.builtins).check(d.body, d.sig, new Map());
       } catch (e) {
         if (e instanceof CairnError) errors.set(d.name, e);
         else throw e;
@@ -142,14 +179,18 @@ export function update(state: State, source: string, opts: { dryRun?: boolean } 
   const edited = new Set(
     modifiedExisting.filter((n) => nameLevelKey(decls.find((d) => d.name === n)!) !== nameLevelKey(denormalize(state.entries[dev[n]], (h) => names.get(h)))),
   );
+  // A file decl is always hashed against the current builtins, so an unedited one may still
+  // have moved because a builtin it uses got a new version.
+  const upgradedBuiltins = new Map(modifiedExisting.map((n) => [n, builtinChanges(state.entries[dev[n]], passA.get(n)!)]));
+  const roots = new Set([...edited, ...modifiedExisting.filter((n) => upgradedBuiltins.get(n)!.length)]);
 
   // --- Find every existing definition that (transitively) depends on a modified one.
   const affected = [...new Set([...transitiveDependents(state, dev, modifiedExisting.map((n) => dev[n])), ...cycleMates])].filter((n) => !fileNames.has(n));
   const dependentDecls = affected.map((n) => denormalize(state.entries[dev[n]], (h) => names.get(h)));
 
-  // why is each dependent affected? (shortest path back to an edited name)
+  // why is each dependent affected? (shortest path back to an edited or upgraded name)
   const via = (name: string): string[] => {
-    const modified = edited;
+    const modified = roots;
     const prev = new Map<string, string>();
     const queue = [name];
     const visited = new Set([name]);
@@ -188,11 +229,13 @@ export function update(state: State, source: string, opts: { dryRun?: boolean } 
       const existing = names.get(newHash);
       kind = existing ? { k: "alias", of: existing } : { k: "new" };
     } else if (oldHash === passA.get(d.name)!.hash) kind = { k: "unchanged" };
-    else if (!edited.has(d.name)) kind = { k: "propagated", via: via(d.name) };
-    else {
+    else if (!edited.has(d.name)) {
+      const builtins = upgradedBuiltins.get(d.name)!;
+      kind = builtins.length ? { k: "upgraded", builtins } : { k: "propagated", via: via(d.name) };
+    } else {
       const oldType = state.entries[oldHash].sig;
       const tc = typeEq(oldType, d.sig) ? "none" : subtype(d.sig, oldType) ? "compatible" : "incompatible";
-      kind = { k: "modified", typeChange: tc, oldType, newType: d.sig };
+      kind = { k: "modified", typeChange: tc, oldType, newType: d.sig, builtins: upgradedBuiltins.get(d.name)! };
     }
     report.changes.push({ name: d.name, kind, oldHash, newHash, isTest });
   }
@@ -270,8 +313,10 @@ function describeChangeKind(c: Change): string {
           : k.typeChange === "compatible"
             ? `type changed compatibly: ${showType(k.oldType)}  ⟶  ${showType(k.newType)} (new <: old)`
             : `type changed INCOMPATIBLY: ${showType(k.oldType)}  ⟶  ${showType(k.newType)}`;
-      return `~ ${c.name}  ${arrow}  ${t}`;
+      return `~ ${c.name}  ${arrow}  ${t}${k.builtins.length ? `; builtins upgraded: ${k.builtins.join(", ")}` : ""}`;
     }
+    case "upgraded":
+      return `^ ${c.name}  ${arrow}  source unchanged, builtins upgraded: ${k.builtins.join(", ")}`;
     case "propagated":
       return c.newHash
         ? `↻ ${c.name}  ${arrow}  re-checked OK, rehashed (via ${k.via.join(" ← ")})`
