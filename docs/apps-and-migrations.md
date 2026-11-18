@@ -247,25 +247,10 @@ Why a log rather than a graph of migrations between type hashes:
 Each migration is still content-addressed like any other definition: it has a hash, and its tests
 are cached by it. Only the choice of what runs comes from the log.
 
-### Replacing pending steps with a shortcut
-
-If dev changed the type twice before a deploy (`A → B → C`), one direct `A → C` migration may be
-cleaner. An `update` may provide a migration whose input is the type at an earlier point in the
-pending log; it **replaces** the steps from that point on. The log stays the source of truth, so the
-replacement must agree with what it replaces. At `update` time the checker runs both the existing
-steps and the replacement on the live state and on the inputs the tests use, and compares the
-results:
-
-```
-replacing pending migrations addLastVisit → renameVisits with one direct migration:
-  ✓ identical result on the live state and on 4 test inputs
-```
-
-If they differ, the update shows the difference and is refused unless the user accepts it
-explicitly (`--accept-migration-diff`). This is not a proof that the two agree on every input,
-which is undecidable in general, but it is a check on the data the migration will actually run on.
-A `fix` in the replaced range is never removed by a shortcut; the shortcut can only cover the
-migrations before or after it.
+Pending steps are never merged or replaced: if dev changes the type twice before a deploy, both
+steps run. Migrations run in memory, so a longer log costs microseconds. Replacing a chain with
+one direct migration (checked by comparing results) can be added later if long histories or
+large stored data make it worthwhile.
 
 ### Every migration needs a test
 
@@ -283,7 +268,7 @@ Each way a migration could fail is ruled out or made harmless:
 | Produces invalid data or crashes partway | `NaN` and `Infinity` cannot occur, and division by zero must be handled in the types (section 1). The one remaining runtime error is numeric overflow, which is very rare; if it happens, the transactional switch leaves everything unchanged. |
 | Never finishes | A migration and everything it reaches must be **non-recursive**. Hashing already finds recursion groups, so the check is cheap. Iteration uses total list operations only. |
 | Exceeds memory or time | The **transactional switch** below: if the real run fails, nothing changes. A **dry run** on the live state at `update` time gives early warning, but the state can change before the switch, so the dry run is not the guarantee. |
-| Does the wrong thing | Not decidable. At least one test per migration (required), the comparison when a shortcut replaces pending steps, and replay (section 8). |
+| Does the wrong thing | Not decidable. At least one test per migration (required), and replay (section 8). |
 
 ### The switch is transactional
 
@@ -452,8 +437,8 @@ These fall out of the design with little extra work:
    local instances.
 3. Computed API versions, and `cairn deploy --dry-run`.
 4. Stateful apps: `init` and `Model` on a single instance, the migration requirement for `Model`,
-   totality checks, the migration log, the transactional switch, `fix` declarations, required
-   migration tests, and shortcut comparison.
+   totality checks, the migration log, the transactional switch, `fix` declarations and required
+   migration tests.
 5. The rollback rule and the state counter.
 6. Commands and `onMsg`, with `Msg` migrations.
 7. Replay against recorded requests; OpenAPI generation; HTTP caching.
