@@ -25,7 +25,7 @@ build step and no loader. `npm install` only fetches TypeScript, for `npm run ty
 
 ```sh
 npm install
-npm test               # 34 unit tests
+npm test               # 38 unit tests
 sh examples/demo.sh    # end-to-end walkthrough (output also in DEMO.md)
 ./cairn                # CLI help
 ```
@@ -44,6 +44,34 @@ The workflow is the Unison "scratch file" model: a source file holds only what y
 ```
 
 State lives in `./.cairn/state.json` (override with `CAIRN_HOME`).
+
+## Test coverage
+
+Every test run records which definitions it ran and which branch of each `if` it took. Like the
+test's result, that is a permanent fact about the test's hash, so it is cached with the result and
+measured once. Each definition counts one unit for running and one per branch of each `if`.
+
+`update` and `deploy` report coverage of what changed since live, and `cairn coverage` lists every
+gap:
+
+```
+coverage: 50% of changed definitions (2/4 units), minimum 80% — NOT MET
+  fee (2/3): 'if o.qty * o.price < 100' never false
+  label (0/1): never run by any test
+```
+
+A project chooses its own minimum in `cairn.json`, which the deploy gate enforces:
+
+```json
+{ "coverage": { "minimum": 80, "of": "changed" } }
+```
+
+- `minimum`: a percentage from 0 to 100. The default, 0, only reports.
+- `of`: `"changed"` (definitions new or changed since live, the default) or `"all"`.
+- `--min-coverage N` on `update`, `deploy` or `coverage` overrides the minimum for one command.
+
+Coverage says code ran, not that it was checked, so a high minimum is a choice for each project,
+not a default.
 
 ## Plugins: HTTP and WebSockets
 
@@ -101,6 +129,7 @@ one shared state file on one machine.
 | Deploy gate | `runtime.ts`, `cli.ts` | `live` is only written by `deploy`: all tests must pass, then the namespace pointer is swapped atomically. `update` runs the affected tests as soon as code is staged (failing ones are still staged, but block the deploy), so a deploy normally only reads the cache and does no work. `--skip-tests` defers them to the deploy. |
 | Rollback | `runtime.ts` | The previous namespace is just another pointer, and the code it refers to is still in the append-only store. |
 | Versioned builtins | `builtins.ts`, `hash.ts`, `codebase.ts` | Builtins are immutable and versioned; hash-form code pins `name@version`, so a builtin's version is part of every hash that uses it. Publishing a new version changes nothing stored: old code (and rollback targets) keep running the old version. `upgrade` re-hashes the code still pinned to an old version, propagates to dependents, and the next deploy re-runs exactly the tests that reach the changed builtin. Code re-hashed for an unrelated edit keeps its pins. |
+| Test coverage | `coverage.ts`, `eval.ts`, `config.ts` | The evaluator records the definitions and `if` branches a test reaches; the set is cached with the test's result, like the result itself. `cairn.json` sets a minimum the deploy gate enforces, over changed or all definitions. |
 | Plugins | `plugins/`, `host.ts`, `store.ts` | `@plugin(...)` bindings are checked by their plugin at update time and hashed with the def, including the plugin version. The host gives plugins a runtime and follows the state file, so one deploy switches every instance; `http` and `ws` check inputs against the declared types and project outputs onto them. |
 | Runaway tests | `eval.ts`, `runtime.ts` | Evaluation budget plus stack-overflow capture: a non-terminating test fails the gate instead of hanging it. |
 
@@ -122,6 +151,8 @@ src/
   host.ts       runs entry-point plugins against live and follows deploys
   plugins/      the plugin interface, the JSON mapping, and the http and ws plugins
   store.ts      loading and atomic saving of the state file
+  coverage.ts   coverage units, recorded per test and reported per definition
+  config.ts     project settings from cairn.json (the coverage policy)
   cli.ts        command line
 test/           unit tests (node:test)
 examples/       v1 … v7 scenario files + demo.sh

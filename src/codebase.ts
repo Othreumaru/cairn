@@ -11,7 +11,8 @@ import { subtype, typeEq } from "./types.ts";
 /** name -> hash. A namespace is just a pointer table; code itself is immutable. */
 export type Namespace = Record<string, string>;
 
-export type TestResult = { passed: boolean; detail: string; ms: number };
+/** `covers`: the coverage units (see coverage.ts) the test reached, as permanent as its result. */
+export type TestResult = { passed: boolean; detail: string; ms: number; covers?: string[] };
 
 export type State = {
   entries: Record<string, Entry>; // append-only store, keyed by hash

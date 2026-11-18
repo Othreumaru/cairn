@@ -5,6 +5,8 @@ import { declOf, describeChange, emptyState, invert, type Namespace, nsId, remov
 import { short } from "./hash.ts";
 import { deploy, evaluate, rollback, runTests, type TestRun } from "./runtime.ts";
 import { showType } from "./pretty.ts";
+import { type Config, loadConfig } from "./config.ts";
+import { coverage, type CoverageReport, describeCoverage } from "./coverage.ts";
 import { host } from "./host.ts";
 import { PLUGINS } from "./plugins/index.ts";
 import { load, save, stateFile } from "./store.ts";
@@ -20,7 +22,17 @@ function printRun(r: TestRun) {
   }
 }
 
-function printUpdate(state: State, prevDev: Namespace, r: UpdateReport, title: string, dryRun: boolean, skipTests: boolean): number {
+/** One summary line, then the definitions that are not fully covered (at most `limit` of them). */
+function printCoverage(r: CoverageReport, minimum: number, indent: string, limit = Infinity) {
+  const below = r.percent < minimum;
+  const min = minimum > 0 ? `, minimum ${minimum}%${below ? " — NOT MET" : ""}` : "";
+  console.log(`${indent}coverage: ${describeCoverage(r)}${min}`);
+  const gaps = r.defs.filter((d) => d.missing.length);
+  for (const d of gaps.slice(0, limit)) console.log(`${indent}  ${d.name} (${d.covered}/${d.total}): ${d.missing.join("; ")}`);
+  if (gaps.length > limit) console.log(`${indent}  … and ${gaps.length - limit} more (cairn coverage)`);
+}
+
+function printUpdate(state: State, prevDev: Namespace, r: UpdateReport, title: string, dryRun: boolean, skipTests: boolean, config: Config): number {
   console.log(`${title}${dryRun ? " (dry run)" : ""}:`);
   if (r.fileErrors.length) {
     for (const e of r.fileErrors) console.log(`  ✗ ${e.name}${e.line ? ` (line ${e.line}:${e.col})` : ""}: ${e.error}`);
@@ -48,6 +60,9 @@ function printUpdate(state: State, prevDev: Namespace, r: UpdateReport, title: s
     const touched = new Set(r.changes.filter((c) => c.newHash && c.newHash !== c.oldHash).map((c) => c.name));
     const failed = runTests(state, state.dev, prevDev, touched, (run) => !run.cached && printRun(run)).filter((x) => !x.result.passed);
     if (failed.length) console.log(`  ${failed.length} test(s) failing (${failed.map((f) => f.name).join(", ")}): staged, but deploy will refuse until they pass`);
+    const cov = coverage(state, state.dev, config.coverage.of, state.live);
+    if (cov.total) printCoverage(cov, config.coverage.minimum, "", 5);
+    if (cov.percent < config.coverage.minimum) console.log(`  staged, but deploy will refuse until coverage reaches ${config.coverage.minimum}%`);
   }
   if (r.applied) save(state);
   console.log(r.applied ? `dev is now ${nsLabel(nsId(state.dev))}` : "dry run — nothing applied");
@@ -60,17 +75,25 @@ function main(argv: string[]) {
   const dryRun = args.includes("--dry-run");
   const skipTests = args.includes("--skip-tests");
   const prevDev = { ...state.dev };
-  const rest = args.filter((a) => !a.startsWith("--"));
+  // cairn.json sets the coverage policy; --min-coverage N overrides its minimum for this command.
+  const config = loadConfig();
+  const mi = args.indexOf("--min-coverage");
+  if (mi >= 0) {
+    const n = mi + 1 < args.length ? Number(args[mi + 1]) : NaN;
+    if (!(n >= 0 && n <= 100)) throw new CairnError("--min-coverage needs a number from 0 to 100");
+    config.coverage.minimum = n;
+  }
+  const rest = args.filter((a, i) => !a.startsWith("--") && !(mi >= 0 && i === mi + 1));
 
   switch (cmd) {
     case "update": {
       const file = rest[0];
       if (!file) throw new CairnError("usage: cairn update <file.cairn> [--dry-run] [--skip-tests]");
-      return printUpdate(state, prevDev, update(state, readFileSync(file, "utf8"), { dryRun }), `impact of ${file}`, dryRun, skipTests);
+      return printUpdate(state, prevDev, update(state, readFileSync(file, "utf8"), { dryRun }), `impact of ${file}`, dryRun, skipTests, config);
     }
 
     case "upgrade":
-      return printUpdate(state, prevDev, upgrade(state, { dryRun }), "upgrading definitions pinned to old builtin versions", dryRun, skipTests);
+      return printUpdate(state, prevDev, upgrade(state, { dryRun }), "upgrading definitions pinned to old builtin versions", dryRun, skipTests, config);
 
     case "deploy": {
       console.log(`deploy: dev ${nsLabel(nsId(state.dev))} → live (currently ${nsLabel(state.live ? nsId(state.live) : null)})`);
@@ -81,6 +104,7 @@ function main(argv: string[]) {
       console.log("  gate:");
       const r = deploy(state, {
         onRun: (run) => printRun(run),
+        coverage: config.coverage,
       });
       if (r.reason && r.accepted && !r.runs.length) {
         console.log(`  ${r.reason}`);
@@ -89,6 +113,7 @@ function main(argv: string[]) {
       const ran = r.runs.filter((x) => !x.cached).length;
       console.log(`  changes: +${r.added.length} added, ~${r.changed.length} changed, -${r.removed.length} removed`);
       console.log(`  tests: ${r.runs.length} total — ${ran} ran, ${r.runs.length - ran} served from cache`);
+      if (r.coverage?.total) printCoverage(r.coverage, config.coverage.minimum, "  ", 5);
       save(state); // test results are cached even when the deploy is rejected
       if (!r.accepted) {
         console.log(`\nREJECTED — ${r.reason}. live unchanged at ${nsLabel(r.fromId)}.`);
@@ -176,6 +201,17 @@ function main(argv: string[]) {
       return undefined; // keep running
     }
 
+    case "coverage": {
+      // Coverage of dev by its tests: of what is new or changed since live (default), or --all.
+      const of = args.includes("--all") ? "all" : args.includes("--changed") ? "changed" : config.coverage.of;
+      runTests(state, state.dev, state.live ?? {}, new Set()); // records coverage for results cached before it was measured
+      save(state);
+      const r = coverage(state, state.dev, of, state.live);
+      printCoverage(r, config.coverage.minimum, "");
+      for (const d of r.defs.filter((x) => !x.missing.length)) console.log(`  ${d.name} (${d.covered}/${d.total}): fully covered`);
+      return r.percent < config.coverage.minimum ? 1 : 0;
+    }
+
     case "bindings": {
       const ns = args.includes("--dev") ? state.dev : state.live ?? {};
       const rows = Object.keys(ns)
@@ -212,6 +248,11 @@ function main(argv: string[]) {
   serve [--http N] [--ws N]   serve the bindings in live through the http and ws plugins (default:
                               --http 3000), switching to each new deploy as it happens
   bindings [--dev]            list the plugin bindings in live (or dev)
+  coverage [--all|--changed]  test coverage of dev: of what changed since live (default) or of
+                              everything; each definition counts once for running and once per
+                              branch of each if. The minimum comes from cairn.json
+                              ({ "coverage": { "minimum": 80, "of": "changed" } }) and is
+                              enforced by deploy; --min-coverage N overrides it
   upgrade [--dry-run] [--skip-tests]
                               move code pinned to old builtin versions onto the current ones
   rename <old> <new>          rename (free: hashes don't change)

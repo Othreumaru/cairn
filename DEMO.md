@@ -27,14 +27,16 @@ impact of examples/v1.cairn:
   + parity  #99a19c70  new
 
 tests: running 8 now, 0 cached
-    ✓ extraFieldsOk        RAN 0.22ms  (new test)
-    ✓ factorial            RAN 0.10ms  (new test)
-    ✓ feeIsOnePercent      RAN 0.07ms  (new test)
-    ✓ lambdaInferred       RAN 0.02ms  (new test)
-    ✓ parity               RAN 0.03ms  (new test)
-    ✓ receiptFormat        RAN 0.06ms  (new test)
-    ✓ subtotalWorks        RAN 0.00ms  (new test)
+    ✓ extraFieldsOk        RAN 0.39ms  (new test)
+    ✓ factorial            RAN 0.29ms  (new test)
+    ✓ feeIsOnePercent      RAN 0.05ms  (new test)
+    ✓ lambdaInferred       RAN 0.08ms  (new test)
+    ✓ parity               RAN 0.09ms  (new test)
+    ✓ receiptFormat        RAN 0.08ms  (new test)
+    ✓ subtotalWorks        RAN 0.01ms  (new test)
     ✓ totalAddsFee         RAN 0.01ms  (new test)
+coverage: 93% of changed definitions (13/14 units)
+  isOdd (2/3): 'if n == 0' never true
 dev is now ns#9f7ff2e5
 
 $ cairn deploy
@@ -50,6 +52,8 @@ deploy: dev ns#9f7ff2e5 → live (currently (empty))
     ✓ totalAddsFee         cached #0dc58c04
   changes: +16 added, ~0 changed, -0 removed
   tests: 8 total — 0 ran, 8 served from cache
+  coverage: 93% of changed definitions (13/14 units)
+    isOdd (2/3): 'if n == 0' never true
 
 ACCEPTED — atomic swap: live is now ns#9f7ff2e5
 
@@ -78,10 +82,11 @@ impact of examples/v3-min-fee.cairn:
   ↻ receiptFormat  #6ebb5c46 → #9977ae58  re-checked OK, rehashed (via receiptFormat ← receipt ← total ← fee)
 
 tests: running 4 now, 5 cached
-    ✓ feeIsOnePercent      RAN 0.20ms  (affected via feeIsOnePercent → fee)
-    ✓ minFeeApplies        RAN 0.18ms  (new test)
-    ✓ receiptFormat        RAN 0.08ms  (affected via receiptFormat → receipt → total → fee)
-    ✓ totalAddsFee         RAN 0.02ms  (affected via totalAddsFee → total → fee)
+    ✓ feeIsOnePercent      RAN 0.28ms  (affected via feeIsOnePercent → fee)
+    ✓ minFeeApplies        RAN 0.12ms  (new test)
+    ✓ receiptFormat        RAN 0.14ms  (affected via receiptFormat → receipt → total → fee)
+    ✓ totalAddsFee         RAN 0.05ms  (affected via totalAddsFee → total → fee)
+coverage: 100% of changed definitions (3/3 units)
 dev is now ns#2e350d69
 
 $ cairn deploy
@@ -98,6 +103,7 @@ deploy: dev ns#2e350d69 → live (currently ns#9f7ff2e5)
     ✓ totalAddsFee         cached #ad9cdf59
   changes: +1 added, ~6 changed, -0 removed
   tests: 9 total — 0 ran, 9 served from cache
+  coverage: 100% of changed definitions (3/3 units)
 
 ACCEPTED — atomic swap: live is now ns#2e350d69
 
@@ -116,11 +122,12 @@ impact of examples/v4-bug.cairn:
   ↻ receiptFormat  #9977ae58 → #54cb5693  re-checked OK, rehashed (via receiptFormat ← receipt ← total ← fee)
 
 tests: running 4 now, 5 cached
-    ✗ feeIsOnePercent      RAN 0.22ms — evaluated to false  (affected via feeIsOnePercent → fee)
-    ✓ minFeeApplies        RAN 0.15ms  (affected via minFeeApplies → fee)
-    ✗ receiptFormat        RAN 0.12ms — evaluated to false  (affected via receiptFormat → receipt → total → fee)
-    ✗ totalAddsFee         RAN 0.02ms — evaluated to false  (affected via totalAddsFee → total → fee)
+    ✗ feeIsOnePercent      RAN 0.32ms — evaluated to false  (affected via feeIsOnePercent → fee)
+    ✓ minFeeApplies        RAN 0.11ms  (affected via minFeeApplies → fee)
+    ✗ receiptFormat        RAN 0.15ms — evaluated to false  (affected via receiptFormat → receipt → total → fee)
+    ✗ totalAddsFee         RAN 0.05ms — evaluated to false  (affected via totalAddsFee → total → fee)
   3 test(s) failing (feeIsOnePercent, receiptFormat, totalAddsFee): staged, but deploy will refuse until they pass
+coverage: 100% of changed definitions (3/3 units)
 dev is now ns#498eeec9
 
 $ cairn deploy
@@ -236,8 +243,10 @@ impact of examples/v7-loop.cairn:
   + settleTerminates  #f366becb  new
 
 tests: running 1 now, 9 cached
-    ✗ settleTerminates     RAN 6.31ms — stack overflow (possible infinite recursion)  (new test)
+    ✗ settleTerminates     RAN 9.41ms — stack overflow (possible infinite recursion)  (new test)
   1 test(s) failing (settleTerminates): staged, but deploy will refuse until they pass
+coverage: 67% of changed definitions (2/3 units)
+  settle (2/3): 'if n == 0' never true
 dev is now ns#147941f7
 
 $ cairn deploy

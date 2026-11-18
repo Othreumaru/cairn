@@ -6,6 +6,7 @@ import { normalize, short } from "./hash.ts";
 import { BUILTINS, currentVersion } from "./builtins.ts";
 import { parseExpr } from "./parser.ts";
 import { showType } from "./pretty.ts";
+import { coverage, type CoverageReport, type CoverageScope, describeCoverage } from "./coverage.ts";
 
 /**
  * The runtime owns the `live` namespace. Nothing reaches it except through `deploy`, and
@@ -26,20 +27,23 @@ export type DeployReport = {
   removed: string[];
   changed: string[];
   runs: TestRun[];
+  coverage?: CoverageReport;
   reason?: string;
 };
 
 export function runTest(state: State, hash: string, fuel = 200_000): TestResult {
   const ev = new Evaluator((h) => state.entries[h], fuel);
+  ev.cover = new Set();
   const t0 = performance.now();
+  const covers = () => [...ev.cover!].sort();
   try {
     const v = ev.global(hash);
     const ms = performance.now() - t0;
-    return v === true ? { passed: true, detail: "true", ms } : { passed: false, detail: `evaluated to ${showValue(v)}`, ms };
+    return v === true ? { passed: true, detail: "true", ms, covers: covers() } : { passed: false, detail: `evaluated to ${showValue(v)}`, ms, covers: covers() };
   } catch (e) {
     const ms = performance.now() - t0;
     const msg = e instanceof RangeError ? "stack overflow (possible infinite recursion)" : e instanceof Error ? e.message : String(e);
-    return { passed: false, detail: msg, ms };
+    return { passed: false, detail: msg, ms, covers: covers() };
   }
 }
 
@@ -96,7 +100,8 @@ export function runTests(
     .sort();
   for (const name of tests) {
     const h = ns[name];
-    const cachedResult = state.testCache[h];
+    // A result cached before coverage was recorded is run once more to record it (tests are pure).
+    const cachedResult = state.testCache[h]?.covers ? state.testCache[h] : undefined;
     let run: TestRun;
     if (cachedResult) run = { name, hash: h, result: cachedResult, cached: true };
     else {
@@ -111,7 +116,10 @@ export function runTests(
   return runs;
 }
 
-export function deploy(state: State, opts: { onRun?: (r: TestRun) => void } = {}): DeployReport {
+export function deploy(
+  state: State,
+  opts: { onRun?: (r: TestRun) => void; coverage?: { minimum: number; of: CoverageScope } } = {},
+): DeployReport {
   const staged = state.dev;
   const live = state.live ?? {};
   const toId = nsId(staged);
@@ -134,6 +142,15 @@ export function deploy(state: State, opts: { onRun?: (r: TestRun) => void } = {}
   if (failed.length) {
     report.reason = `${failed.length} test(s) failed: ${failed.map((f) => f.name).join(", ")}`;
     return report;
+  }
+
+  // Coverage of what this deploy changes (or of everything), against the project's minimum.
+  if (opts.coverage) {
+    report.coverage = coverage(state, staged, opts.coverage.of, state.live);
+    if (report.coverage.percent < opts.coverage.minimum) {
+      report.reason = `coverage is ${describeCoverage(report.coverage)}, below the minimum of ${opts.coverage.minimum}%`;
+      return report;
+    }
   }
 
   // Atomic swap: one pointer assignment. The previous namespace stays addressable for rollback.

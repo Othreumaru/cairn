@@ -7,6 +7,8 @@ import { emptyState, staleBuiltins, update, upgrade, rename, remove, view } from
 import { parseExpr, parseProgram } from "../src/parser.ts";
 import { showDecl, showExpr } from "../src/pretty.ts";
 import { deploy, evaluate, rollback, runTests } from "../src/runtime.ts";
+import { parseConfig } from "../src/config.ts";
+import { coverage } from "../src/coverage.ts";
 import { runtimeFor } from "../src/host.ts";
 import { handle } from "../src/plugins/http.ts";
 import { frame, parseFrames, ws } from "../src/plugins/ws.ts";
@@ -472,4 +474,63 @@ test("ws: a connection survives a deploy that keeps its message types, and is cl
   } finally {
     server.stop();
   }
+});
+
+// ---------------- coverage ----------------
+
+const feeSrc = `
+  def fee(o: { qty: number, price: number }): number =
+    if o.qty * o.price < 100 then 1 else o.qty * o.price * 0.01
+  def label(n: number): string = "fee: " ++ str(n)
+  test small = fee({ qty: 1, price: 1 }) == 1`;
+
+test("coverage counts each definition once for running and once per branch of each if", () => {
+  const s = fresh(feeSrc);
+  runTests(s, s.dev, {}, new Set());
+  const r = coverage(s, s.dev, "all", null);
+  assert.deepEqual(
+    r.defs.map((d) => [d.name, d.covered, d.total, d.missing]),
+    [
+      ["fee", 2, 3, ["'if o.qty * o.price < 100' never false"]],
+      ["label", 0, 1, ["never run by any test"]],
+    ],
+  );
+  assert.equal(r.percent, 50);
+  assert.ok(s.testCache[s.dev.small].covers!.length > 0, "coverage is stored with the cached result");
+});
+
+test("the deploy gate enforces a minimum, scoped to what changed since live", () => {
+  const s = fresh(feeSrc);
+  const min = (minimum: number, of: "changed" | "all" = "changed") => deploy(s, { coverage: { minimum, of } });
+  const refused = min(80);
+  assert.equal(refused.accepted, false);
+  assert.match(refused.reason!, /coverage is 50% of changed definitions \(2\/4 units\), below the minimum of 80%/);
+  assert.ok(min(50).accepted);
+
+  // Only the new definition counts now, and its test covers it fully.
+  update(s, `def double(n: number): number = n * 2
+             test doubles = double(2) == 4`);
+  runTests(s, s.dev, s.live!, new Set());
+  assert.equal(coverage(s, s.dev, "changed", s.live).percent, 100);
+  assert.equal(coverage(s, s.dev, "all", s.live).percent, 60);
+  assert.equal(min(80, "all").accepted, false);
+  assert.ok(min(80).accepted);
+});
+
+test("a result cached before coverage was recorded is run once more to record it", () => {
+  const s = fresh(feeSrc);
+  runTests(s, s.dev, {}, new Set());
+  delete s.testCache[s.dev.small].covers;
+  const [run] = runTests(s, s.dev, {}, new Set());
+  assert.equal(run.cached, false);
+  assert.ok(s.testCache[s.dev.small].covers);
+  assert.equal(runTests(s, s.dev, {}, new Set())[0].cached, true);
+});
+
+test("cairn.json: coverage settings are validated, with reporting only by default", () => {
+  assert.deepEqual(parseConfig("{}").coverage, { minimum: 0, of: "changed" });
+  assert.deepEqual(parseConfig('{ "coverage": { "minimum": 90, "of": "all" } }').coverage, { minimum: 90, of: "all" });
+  assert.throws(() => parseConfig('{ "coverage": { "minimum": 120 } }'), /from 0 to 100/);
+  assert.throws(() => parseConfig('{ "coverage": { "of": "some" } }'), /"changed" or "all"/);
+  assert.throws(() => parseConfig("{"), /not valid JSON/);
 });

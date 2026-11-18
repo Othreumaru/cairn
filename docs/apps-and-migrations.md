@@ -531,6 +531,11 @@ These fall out of the design with little extra work:
   any point is a fold over that log from `init`: requests and messages through the code that was
   live at the time, and each deploy through its migration log. Any bug can then be reproduced
   exactly by replay, as in Elm's debugger.
+- **Coverage as a cached fact.** The definitions and `if` branches a test reaches are as
+  deterministic as its result, so they are cached with it and measured once per test hash. Each
+  project sets its own minimum in `cairn.json` (none by default), over definitions changed since
+  live or over all of them, and the deploy gate enforces it. Coverage says code ran, not that it was
+  checked, which is why no minimum is imposed by default. (Built in the prototype.)
 - **Canary deploys.** Send a percentage of requests to the new namespace: two pointers and a
   weighted choice. For stateful apps this has the same restriction as several majors.
 
