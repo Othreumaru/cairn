@@ -233,39 +233,73 @@ The app architecture depends on features Cairn does not have yet.
 
 ## 2. Apps
 
-An app is a new kind of declaration, alongside `def` and `test`. It declares its routes, each
-with its own request and response types. (HTTP routes are provided by the `http` plugin, see
-section 9; whether bindings are grouped in an `app` block as below or written as annotations on
-each definition is an open question.)
+Endpoints are bound with annotations, one syntax for every plugin (section 9): `@http(...)`,
+`@ws(...)`, `@consume(...)`. What belongs to an app as a whole (its state, its store, its message
+handler) is declared once in a small `app` declaration, and the app owns the definitions whose
+names start with its name:
 
 ```
-type Model = { visits: number }
-
-app api = {
-  init: { visits: 0 },
-  routes: {
-    "GET /visits": (req: {}, model) => Reply({
-      response: { status: 200, body: { visits: model.visits } },
-      model: model,
-      cmds: []
-    }),
-    "GET /users/:id": (req: { params: { id: string } }, model) =>
-      Await(Http.get(service("users"), "/" ++ req.params.id), (result, model) => Reply({
-        response: case result of
-          Ok(user) => { status: 200, body: { name: user.name } }
-          Err(_)   => { status: 502, body: { error: "user service unavailable" } },
-        model: model,
-        cmds: []
-      })),
-    "POST /fee": (req: { body: { qty: number, price: number } }, model) => Reply({
-      response: { status: 200, body: { fee: fee(req.body) } },
-      model: { ...model, visits: model.visits + 1 },
-      cmds: []
-    })
-  },
-  onMsg: (msg: Msg, model) => { model: model, cmds: [] }
+app shop {
+  model: { visits: number } = { visits: 0 }
+  store: "shop"                   // a logical resource (section 9)
+  onMsg: shop.handleMsg
 }
+
+@http("GET /visits")
+def shop.visits(req: {}, model) = Reply({
+  response: { status: 200, body: { visits: model.visits } },
+  model: model,
+  cmds: []
+})
+
+@http("GET /users/:id")
+def shop.user(req: { params: { id: string } }, model) =
+  Await(Http.get(service("users"), "/" ++ req.params.id), (result, model) => Reply({
+    response: case result of
+      Ok(user) => { status: 200, body: { name: user.name } }
+      Err(_)   => { status: 502, body: { error: "user service unavailable" } },
+    model: model,
+    cmds: []
+  }))
+
+@http("POST /fee")
+def shop.fee(req: { body: { qty: number, price: number } }, model) = Reply({
+  response: { status: 200, body: { fee: fee(req.body) } },
+  model: { ...model, visits: model.visits + 1 },
+  cmds: []
+})
+
+def shop.handleMsg(msg: Msg, model) = { model: model, cmds: [] }
 ```
+
+### Apps and membership
+
+- **An `app` declares what belongs to the app as a whole:** its `Model` type and initial value, the
+  logical resource that stores it, and its `onMsg`. It does not list its routes.
+- **Membership is by name:** app `shop` owns the definitions named `shop.*`. A bound definition in
+  an app receives the app's `model`, checked against the app's `Model` type.
+- **Why by name.** Names are mutable pointers and hashes are code. Which app a route belongs to is
+  wiring, like `live` and logical resources, not part of the route's behaviour: the route takes a
+  `model` of some type, and the namespace and the deployment config decide which store supplies it.
+  So renames stay free (no hash changes), and moving a route between apps is visible: it leaves
+  one app's API and joins another's, and the computed versions show it.
+- **The default app.** Bindings outside any app belong to the namespace's default app, which has no
+  state, so simple stateless code needs no `app` at all.
+- **An app is the unit of** state (one `Model`, or its topics and projections; one migration log;
+  one request queue), versioning (its own API version and state counter, section 6), and rollback
+  safety and the deploy preview. A deploy still moves the whole namespace at once, and each app
+  reports its own version and impact:
+
+  ```
+  shop: v2.4.0+s3 (minor: added route POST /refund)    admin: unchanged
+  ```
+
+An `app` block containing its routes was considered and not chosen: every plugin would need its own
+section inside the block, a new kind of binding would mean changing the `app` syntax, and top-level
+bindings would have to move inside. Annotations with membership by name give the same grouping
+without those costs.
+
+### Routes
 
 - Each route takes a request record `In` with up to three fields: `params` (path parameters),
   `query` and `body`. A route with nothing to read declares `{}`. The checker checks that the
@@ -276,12 +310,12 @@ app api = {
     model as it is when the result arrives, returning `Reply` or another `Await`. The request stays
     open meanwhile. This is how a route answers with data from another service.
 - `onMsg` receives results of commands that were not awaited (section 7).
-- The checker infers `Model` from `init`, checks each route and continuation against these
-  shapes, and infers `Out` from the responses a route returns.
+- The checker takes `Model` from the app declaration, checks each route and continuation against
+  these shapes, and infers `Out` from the responses a route returns.
 - Because each route has visible request and response types, the runtime can check requests, the
   API can be versioned per route (section 6), and an OpenAPI description can be generated
   (section 8).
-- A **stateless** app omits `init`, `model` and `onMsg`: routes return
+- A **stateless** app (including the default app) has no `model` or `onMsg`: routes return
   `Reply({ response: Response(Out), cmds: List(Cmd) })` or `Await(cmd, result => ...)`. They can
   still issue commands, such as publishing an event (section 13), whose results nothing waits for
   unless awaited. Stateless apps are the first target, because they scale across instances without
@@ -542,8 +576,9 @@ loses no information, and the new version writes data the old one cannot represe
 
 ## 6. Computed versions
 
-Every deploy is given a version, computed from the change and never typed by hand. The namespace
-hash remains the identity; the version is a readable label for it.
+Every deploy gives each app (section 2) a version, computed from the change and never typed by
+hand. The namespace hash remains the identity; the version is a readable label for it. Versions are
+per app, so a change in one app never moves another app's version.
 
 A version has two parts, because two different audiences read it:
 
@@ -563,7 +598,8 @@ depends on the state at the moment and never affects a version.
 
 ### API version (for clients)
 
-Semantic versioning over **route types only**: the `In` and `Out` types of every route. A route may
+Semantic versioning over the app's **route types only**: the `In` and `Out` types of every route in
+the app. A route may
 change compatibly by accepting more (`old In <: new In`) and returning less (`new Out <: old Out`),
 which is exactly the existing function subtyping rule. Internal definitions and the `Model` never
 affect it.
@@ -646,7 +682,7 @@ These fall out of the design with little extra work:
   "types cannot see a change in meaning" into a check the gate can run: a "patch" that changes
   real responses is reported. This is the README's "shadow deploys" idea, built into the gate.
 - **Time-travel debugging.** If the runtime logs every request, message and deploy, the state at
-  any point is a fold over that log from `init`: requests and messages through the code that was
+  any point is a fold over that log from the app's initial model: requests and messages through the code that was
   live at the time, and each deploy through its migration log. Any bug can then be reproduced
   exactly by replay, as in Elm's debugger.
 - **Coverage as a cached fact.** The definitions and `if` branches a test reaches are as
@@ -719,17 +755,17 @@ def chat(msg: ChatMsg, conn: Conn): List(ChatMsg) = ...
 
 @cron("*/5 * * * *")
 def cleanup(now: number): List(Cmd) = ...
-
-@store("visits")
-type Model = { visits: number }
 ```
+
+An app's state is bound to a store by its `app` declaration (`store: "shop"`, section 2), not by an
+annotation on a type.
 
 The binding, its arguments and the plugin's version are hashed with the definition (the prototype
 does this), so changing a binding changes the hash.
 
 ### Resources and environments
 
-Code names **logical resources**, never environment details: `@store("visits")`, not a database
+Code names **logical resources**, never environment details: `store: "visits"`, not a database
 file; `service("users")`, not a hostname. A **deployment config**, kept outside the hash and
 written per environment, maps each name to something real:
 
@@ -797,7 +833,7 @@ interface CairnPlugin {
 
 Cairn ships a few first-party plugins, so common needs work out of the box. They use the same
 public interface as any third-party plugin, are pinned by package hash like any other, and are
-swappable through logical resources: code says `@store("orders")`, and the deployment config maps
+swappable through logical resources: code says `store: "orders"`, and the deployment config maps
 it to SQLite on a laptop and to another database plugin in production, with the same hash in both.
 
 For backends to be swappable, Cairn code contains **no SQL strings**. It uses typed operations
@@ -1252,7 +1288,8 @@ split, and compare-and-swap between concurrent deployers.
    builtins. HTTP becomes the first entry-point plugin; a WebSocket plugin shows the interface
    generalizes.
 4. Computed API versions, and `cairn deploy --dry-run`.
-5. Stateful apps: `init` and `Model` on a single instance, the one-at-a-time request queue, the
+5. Stateful apps: `app` declarations with membership by name and the default app, the `Model` and
+   its initial value on a single instance, the one-at-a-time request queue, the
    migration requirement for `Model`, totality checks, the migration log, the transactional switch
    and two-phase deploy, `fix` declarations and required migration tests. Storage through the
    storage plugin interface, starting with in-memory and file storage, then the bundled SQLite
@@ -1289,9 +1326,6 @@ split, and compare-and-swap between concurrent deployers.
   there is one state mechanism, or should the plain `Model` stay separate for simplicity?
 - **The first version.** Does the first deploy of an app start at `1.0.0` or `0.1.0`, and do
   `0.x` versions relax the rules as in semver?
-- **Binding syntax.** Annotations on each definition (`@http("POST /quote") def quote ...`, as in
-  section 9), or bindings grouped in an `app` block (as in section 2)? Annotations keep one syntax
-  for every plugin; an `app` block keeps an app's model and its routes together.
 - **Plugin distribution and sandboxing.** Plugins are pinned by package hash (section 9). How are
   they packaged and fetched, and is sandboxing (for example, running plugins in a separate process
   with only the capabilities they declare) worth it later?
@@ -1317,13 +1351,13 @@ depends on it. Items 3 to 5 are resolved by deferring pruning (section 10).
 5. *Resolved by deferring pruning:* automatic pruning of applied migration logs conflicted with
    rollback returning those logs to pending.
 6. **The API version only covers HTTP routes (section 6).** WebSocket message types and published
-   event types are client-facing too. Versions and state counters also belong to a whole deploy,
-   so with several apps in one namespace, a change in one moves the other's version. Likely
-   direction: each plugin declares which types it exposes, and versions are computed per app.
-7. **Bindings on type aliases (sections 1, 9 and 13).** `@topic(...) type Orders` and
-   `@store(...) type Model` bind type aliases, which are expanded before hashing and so are not
-   entities with anywhere to keep a binding. Likely direction: topics and stores become named
-   declarations.
+   event types are client-facing too. Likely direction: each plugin declares which types it exposes.
+   *(The other half, versions belonging to a whole deploy, is resolved: versions are per app,
+   section 2.)*
+7. **Bindings on type aliases (section 13).** `@topic(...) type Orders` binds a type alias, which is
+   expanded before hashing and so is not an entity with anywhere to keep a binding. Likely
+   direction: a named declaration such as `topic orders: OrderEvent`. *(Stores are resolved: an
+   app's store is part of its `app` declaration, section 2.)*
 8. **Type checking across repositories against untyped calls (sections 2, 9 and 14).** Calls are
    written as `Http.get(service("users"), "/" ++ id)`, a string path, and the deployment config maps
    a service to a URL, not to a repository, so there is nothing to check against. Likely direction:
@@ -1346,9 +1380,9 @@ C. **Effects and crashes.** Commands run after the new state is stored, so a cra
    store pending commands atomically with the state (an outbox), with idempotency keys in plugins.
    Also, the one-at-a-time queue must cover every entry point that changes state (WebSocket
    messages, `@consume`, `@cron`, `onMsg`), not only HTTP requests.
-D. **Binding syntax decides more than syntax.** With annotations, nothing says which `Model` or store
-   a route operates on, or which unit gets a version and state counter (item 6). Needs a decision
-   before step 5.
+D. *Resolved (section 2):* binding syntax. Bindings are annotations; a small `app` declaration holds
+   the app's state, store and `onMsg`; membership is by name (`shop.*`); bindings outside any app
+   belong to a stateless default app; and an app is the unit of state, versioning and rollback.
 
 ### Smaller inconsistencies
 
