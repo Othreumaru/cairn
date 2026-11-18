@@ -77,13 +77,13 @@ The app architecture depends on features Cairn does not have yet.
    way recursive definitions already are in `hash.ts`.
 
 5. **`NaN` and `Infinity` never exist as Cairn values.** Number operations currently follow
-   JavaScript (IEEE 754), so `1 / 0`, `0 / 0` and overflow (`1e308 * 10`) yield `Infinity` or
-   `NaN`. Those values fail silently in exactly the places Cairn relies on: `NaN == NaN` is false,
+   JavaScript (IEEE 754), so `1 / 0`, `0 / 0`, `1 % 0` and overflow (`1e308 * 10`) yield
+   `Infinity` or `NaN`. Those values fail silently in exactly the places Cairn relies on: `NaN == NaN` is false,
    so a test can fail and be cached as a fact about its hash; JSON has no representation for them
    (`JSON.stringify` turns them into `null`), so a REST response would break its declared type;
    and they spread through every later computation while still type-checking as `number`.
 
-   The rules:
+   The rules, for division (`/`) and remainder (`%`) alike:
 
    - **Division by a non-zero literal** (`x / 100`) returns a plain `number`. The checker can see
      the divisor is not zero, and this is by far the most common division.
@@ -99,10 +99,10 @@ The app architecture depends on features Cairn does not have yet.
      ```
 
      Without the `case`, `total / count` is rejected: "expected number, but 'total / count' is
-     Result(DivByZero, number) (count may be 0)". Shorter forms: `withDefault(0, total / count)`;
+     Result(DivByZero, number) (count may be 0)". `%` works the same way. Shorter forms: `withDefault(0, total / count)`;
      returning the `Result` to the caller; or, in a route, turning `Err` into a 400.
-   - **`nonZero(x)`** returns `Result(IsZero, NonZero)`. Division by a `NonZero` returns a plain
-     `number`, so a value checked once can be divided by freely.
+   - **`nonZero(x)`** returns `Result(IsZero, NonZero)`. Division or remainder by a `NonZero`
+     returns a plain `number`, so a value checked once can be divided by freely.
    - **Overflow** is an error raised at the operation that overflowed, never a value. It is too rare
      to justify a `Result` on every multiplication. Inside a migration it is caught by the
      transactional switch (section 4).
@@ -110,7 +110,7 @@ The app architecture depends on features Cairn does not have yet.
 ## 2. Apps
 
 An app is a new kind of declaration, alongside `def` and `test`. It declares its routes, each
-with its own types:
+with its own request and response types:
 
 ```
 type Model = { visits: number }
@@ -118,31 +118,60 @@ type Model = { visits: number }
 app api = {
   init: { visits: 0 },
   routes: {
-    "GET /visits": (model) => {
+    "GET /visits": (req: {}, model) => Reply({
       response: { status: 200, body: { visits: model.visits } },
       model: model,
       cmds: []
-    },
-    "POST /fee": (body: { qty: number, price: number }, model) => {
-      response: { status: 200, body: { fee: fee(body) } },
+    }),
+    "GET /users/:id": (req: { params: { id: string } }, model) =>
+      Await(Http.get("https://users.internal/" ++ req.params.id), (result, model) => Reply({
+        response: case result of
+          Ok(user) => { status: 200, body: { name: user.name } }
+          Err(_)   => { status: 502, body: { error: "user service unavailable" } },
+        model: model,
+        cmds: []
+      })),
+    "POST /fee": (req: { body: { qty: number, price: number } }, model) => Reply({
+      response: { status: 200, body: { fee: fee(req.body) } },
       model: { ...model, visits: model.visits + 1 },
       cmds: []
-    }
+    })
   },
   onMsg: (msg: Msg, model) => { model: model, cmds: [] }
 }
 ```
 
-- The checker infers `Model` from `init`, and checks each route against
-  `(body: In, model: Model) => { response: Response(Out), model: Model, cmds: List(Cmd) }`, where
-  `In` and `Out` are that route's own types. `onMsg` receives the results of commands (section 7).
-- Because each route has visible input and output types, the runtime can check request bodies,
-  the API can be versioned per route (section 6), and an OpenAPI description can be generated
+- Each route takes a request record `In` with up to three fields: `params` (path parameters),
+  `query` and `body`. A route with nothing to read declares `{}`. The checker checks that the
+  `params` fields match the `:name` segments of the route's path.
+- A route returns one of two things:
+  - `Reply({ response: Response(Out), model: Model, cmds: List(Cmd) })`: answer now.
+  - `Await(cmd, (result, model) => ...)`: perform `cmd`, then continue with its result and the
+    model as it is when the result arrives, returning `Reply` or another `Await`. The request stays
+    open meanwhile. This is how a route answers with data from another service.
+- `onMsg` receives results of commands that were not awaited (section 7).
+- The checker infers `Model` from `init`, checks each route and continuation against these
+  shapes, and infers `Out` from the responses a route returns.
+- Because each route has visible request and response types, the runtime can check requests, the
+  API can be versioned per route (section 6), and an OpenAPI description can be generated
   (section 8).
-- A **stateless** app omits `init`, `model` and `onMsg`: each route is `(body: In) => Response(Out)`.
-  Stateless apps are the first target, because they scale across instances without shared state.
-- The runtime owns the model, calls the matching route for each request, keeps the returned model
-  and performs the returned commands.
+- A **stateless** app omits `init`, `model` and `onMsg`: routes return `Reply(Response(Out))` or
+  `Await(cmd, result => ...)`. Stateless apps are the first target, because they scale across
+  instances without shared state.
+
+Why `Await` rather than replying from `onMsg`: having `onMsg` send a delayed response would split
+one endpoint across several functions, and the checker could no longer tie a response type to the
+route that owes it. With `Await` the whole endpoint is one expression with one response type.
+
+### Running routes
+
+- **Requests to a stateful app are processed one at a time**, like Elm's update loop: a route (or
+  continuation) runs to completion before the next starts, so two requests can never both read
+  and overwrite the same model. Routes are pure and synchronous, so this costs little. Waiting for
+  an `Await`ed command does not hold the queue; only running Cairn code does.
+- **Each request has an evaluation budget**, using the evaluator's existing fuel limit, because
+  routes may recurse. Running out of budget, or a numeric overflow, ends the request with a 500:
+  the model is left unchanged and the route's commands are discarded.
 
 ### The edge between JSON and Cairn values
 
@@ -154,7 +183,8 @@ app api = {
   can carry more fields than its type shows (a `{ name }` may really be `{ name, passwordHash }`),
   and serializing the raw value would leak them.
 - Tests of an app are ordinary pure tests on the data a route returns, so they are cached by hash
-  like every other test.
+  like every other test. A route's `Await` continuation is a function, so tests can call it with
+  a chosen result.
 
 ## 3. Serving and instant deploys across instances
 
@@ -169,16 +199,26 @@ line the design already draws:
 | Test cache: one result per test hash | append-only | as above |
 | `live` pointer and deploy history | mutable | atomic compare-and-swap, so two concurrent deploys cannot both win |
 
-A deploy then works like this:
+A deploy of a **stateless** app works like this:
 
 1. The deployer swaps the `live` pointer with compare-and-swap.
 2. Instances are **notified** (a file watch locally; pub/sub or a watch API in production).
 3. Each instance fetches only the hashes it does not have yet, then switches its local pointer
    in one step.
-4. For **stateless** apps, requests already running finish on the version they started on: each
-   request records the namespace it began with, so a single request never mixes versions and
-   nothing has to be drained. Stateful apps are different; see the transactional switch in
-   section 4.
+4. Requests already running, including ones waiting in an `Await`, finish on the version they
+   started on: each request records the namespace it began with, so a single request never mixes
+   versions and nothing has to be drained.
+
+A deploy of a **stateful** app must not move `live` before its migrations have succeeded, or a
+failed migration would leave `live` naming a version nobody serves. It is two-phase:
+
+1. The deployer asks the instance holding the state to **prepare**: it pauses the request queue
+   and runs the transactional switch (section 4) up to, but not including, the commit.
+2. If preparing fails, the deploy is refused and the instance resumes on the old version. `live`
+   never moved.
+3. If it succeeds, the deployer swaps `live` with compare-and-swap. If the swap wins, the instance
+   commits; if another deploy won the swap first, the instance discards the prepared state and
+   resumes on the old version.
 
 Every response carries the namespace it was served from (`X-Cairn-Namespace: ns#2e35…`), and each
 instance reports the namespace it is serving, so `cairn status` can show a deploy reaching every
@@ -195,7 +235,9 @@ The first implementation targets several local processes sharing a directory
 ### When a migration is required
 
 Whenever an `update` changes the type of a stateful app, the checker compares the type dev had
-just before with the new one. This applies to the `Model` and to `Msg`: messages produced by the
+just before with the new one. If a migration is required, **the same update must provide it**,
+otherwise the update is refused and nothing is staged. That matches how Cairn already treats an
+incompatible type change, whose broken dependents must be fixed in the same file. This applies to the `Model` and to `Msg`: messages produced by the
 old version (results of commands it issued) can be delivered after the switch, so the new `onMsg`
 must accept them.
 
@@ -203,7 +245,7 @@ must accept them.
 |---|---|
 | `Old` and `New` are the same type | not needed |
 | `Old <: New` (a `Model` field removed; a `Msg` variant added) | not needed: existing values are already valid |
-| anything else | **required**: the deploy is refused without one |
+| anything else | **required**: the update is refused without one |
 
 A migration is declared like a function from the old type to the new one:
 
@@ -212,7 +254,16 @@ migration addLastVisit(old: { visits: number }): { visits: number, lastVisit: st
   { ...old, lastVisit: "" }
 ```
 
-`Msg` migrations have the same form and are applied to pending messages during the switch.
+`Msg` migrations have the same form. They are applied to messages waiting to be processed during
+the switch, and also to command results that arrive **after** it: a command the old version started
+may finish later, and its result is an old-type `Msg`. Each command is therefore tagged with the
+deploy that issued it, and when its result arrives, the `Msg` migrations logged by every deploy
+since then are applied first. The deploy history keeps those logs, so this is always possible.
+
+An `Await` continuation is old code with an old `Model` type, so it cannot simply continue after a
+deploy that changed the `Model` or `Msg`. Requests waiting in an `Await` across such a deploy are
+answered with `503 Service Unavailable` and `Retry-After`; requests waiting across a deploy that
+changed neither type continue normally on the version they started on.
 
 A `migration` must change the type: one from a type to itself does nothing a migration is for, and
 is rejected. Changing data without changing its type is a `fix` (see "Fix forward" below).
@@ -228,7 +279,15 @@ in the same way as database migration tools such as Rails, Django or Flyway.
    step; the next step's input type just has to accept the subtype.
 2. `deploy` runs the pending log **in order** on the live state, inside the transactional switch
    below, then records the log in the deploy history and clears it.
-3. The gate checks that the log composes: it starts from live's type and ends at the new one.
+3. The gate checks that the log composes: it starts from the type of the live **state** and ends at
+   the new one. The runtime tracks the state's type separately from the live code's `Model`, since
+   the two differ after a rollback (section 5).
+
+Until it is deployed, the pending log refers to migrations **by name**. Updating a pending migration
+(`addLastVisit` with a corrected body) replaces its step in place, and deleting one removes its
+step; either way the log is re-checked and must still compose. A bug in a migration that has not
+been deployed is therefore fixed by editing it, like any other code. On deploy, each step is frozen
+by hash in the deploy history.
 
 Why a log rather than a graph of migrations between type hashes:
 
@@ -247,7 +306,7 @@ Why a log rather than a graph of migrations between type hashes:
 Each migration is still content-addressed like any other definition: it has a hash, and its tests
 are cached by it. Only the choice of what runs comes from the log.
 
-Pending steps are never merged or replaced: if dev changes the type twice before a deploy, both
+Pending steps are never merged automatically: if dev changes the type twice before a deploy, both
 steps run. Migrations run in memory, so a longer log costs microseconds. Replacing a chain with
 one direct migration (checked by comparing results) can be added later if long histories or
 large stored data make it worthwhile.
@@ -255,7 +314,13 @@ large stored data make it worthwhile.
 ### Every migration needs a test
 
 Migrations change real data permanently, so the gate refuses a deploy when a `migration` or `fix`
-in the pending log has no test that uses it. The reverse dependency index behind
+in the pending log has no test that uses it. Migrations and fixes can be called like functions, so
+a test calls them directly:
+
+```
+test addsEmptyLastVisit = addLastVisit({ visits: 3 }).lastVisit == ""
+```
+ The reverse dependency index behind
 `cairn dependents` already answers "which tests reach this hash?", so the check is cheap.
 
 ### Migrations cannot fail
@@ -272,11 +337,13 @@ Each way a migration could fail is ruled out or made harmless:
 
 ### The switch is transactional
 
-1. Stop accepting new requests, and **wait for requests already running to finish**. Routes are
-   pure and synchronous, so this takes microseconds; it is required because a request running on
-   the old version would otherwise return an old-type model after the migration.
+1. Pause the request queue. Requests run one at a time (section 2), so this only means letting the
+   current one finish, which takes microseconds; it is required because a request running on the
+   old version would otherwise return an old-type model after the migration. Requests waiting in an
+   `Await` are handled as described above.
 2. Run the pending log, in order, on that exact state and on the pending messages.
-3. On success, switch the code pointer and the state together, and resume.
+3. On success, switch the code pointer and the state together, and resume. Across several
+   instances, this commit is the second phase of the deploy in section 3.
 4. On failure, discard the result and resume on the old version. Nothing changed.
 
 So a migration either completes and the new version goes live, or it fails and the old version
@@ -321,7 +388,15 @@ Consequences:
 Pending messages follow the same rule: rolling back past a deploy that added `Msg.Reset` is
 allowed only if no `Reset` message is pending.
 
-Rollback is transactional in the same way as deploy, including waiting for running requests.
+After a rollback, the state's type is the target's `Model` type `T`: the restored code writes values
+of that type from its first request on. Rolling back across a deploy therefore **returns that
+deploy's migration log to the front of the pending log**, so that deploying forward again has a log
+that composes from `T`. Redeploying runs those migrations again. That is type-safe, but data they
+set is set again: redeploying after rolling back past `addLastVisit` resets `lastVisit` to `""`,
+even on records the old code happened to preserve. `cairn deploy --dry-run` (section 8) shows this
+before it happens.
+
+Rollback is transactional in the same way as deploy, including pausing the request queue.
 Reverse migrations are not part of this design: a reverse exists only when the forward migration
 loses no information, and the new version writes data the old one cannot represent anyway.
 
@@ -363,8 +438,11 @@ affect it.
 Types cannot see a change in meaning, so a behaviour change with identical types is labelled a
 patch even if callers care. Two things narrow that gap:
 
-- **Tests** are the written contract: a deploy that **changes or deletes a passing test** is at
-  least minor. Added tests do not count.
+- **Tests** are the written contract: a deploy that **edits or deletes a passing test** is at
+  least minor. "Edits" means the test's own source changed. A test that was only rehashed because
+  something it uses changed does not count, or every behaviour change with tests would be minor;
+  `update` already tells edited definitions apart from rehashed ones. Added tests do not count
+  either.
 - **Replay** (section 8) shows whether real responses would change.
 
 ### State counter (for operators)
@@ -401,9 +479,10 @@ change often leaves the `Model` untouched.
 ## 7. Commands
 
 Routes and `onMsg` return a list of commands (`Cmd`). The runtime performs them after the new
-model is stored and delivers each result to `onMsg` as a `Msg`. The first command is an outgoing
-HTTP request; storage comes later. Command results are where messages from an old version can
-outlive a deploy, which is why section 4 covers `Msg`.
+model is stored and delivers each result to `onMsg` as a `Msg`. A command used in `Await` instead
+delivers its result to the waiting continuation. The first command is an outgoing HTTP request;
+storage comes later. Command results are where messages from an old version can outlive a deploy,
+which is why section 4 covers late `Msg` results and waiting continuations.
 
 ## 8. Cheap additions
 
@@ -414,16 +493,20 @@ These fall out of the design with little extra work:
   computed by the gate.
 - **OpenAPI from routes.** Route types give an OpenAPI description, JSON Schemas for every body,
   and typed clients, with no annotations.
-- **HTTP caching for stateless routes.** A stateless route's response is fully determined by the
-  route's hash and the request, so the hash can serve as the `ETag`, and responses can be cached
-  exactly.
+- **HTTP caching for stateless routes.** A stateless route that does not `Await` a command has a
+  response fully determined by the route's hash and the request, so the hash can serve as the
+  `ETag`, and responses can be cached exactly. Routes that `Await` depend on another service and
+  are not cached this way.
 - **Replay.** Routes are pure, so recorded production requests can be replayed against a candidate
-  before it is deployed, and the responses compared with what live returned. This turns
+  before it is deployed, and the responses compared with what live returned. For routes that
+  `Await` a command, the recorded command results are replayed too, so nothing is sent to other
+  services. This turns
   "types cannot see a change in meaning" into a check the gate can run: a "patch" that changes
   real responses is reported. This is the README's "shadow deploys" idea, built into the gate.
-- **Time-travel debugging.** If the runtime logs every request and message, the state at any
-  point is a fold of the routes over that log from `init`, so any bug can be reproduced exactly by
-  replay, as in Elm's debugger.
+- **Time-travel debugging.** If the runtime logs every request, message and deploy, the state at
+  any point is a fold over that log from `init`: requests and messages through the code that was
+  live at the time, and each deploy through its migration log. Any bug can then be reproduced
+  exactly by replay, as in Elm's debugger.
 - **Canary deploys.** Send a percentage of requests to the new namespace: two pointers and a
   weighted choice. For stateful apps this has the same restriction as several majors.
 
@@ -432,17 +515,19 @@ These fall out of the design with little extra work:
 1. Tagged unions with `case`, lists and the built-in parameterized types, type aliases (including
    recursive types), and the number rules (division returning `Result` unless the divisor is a
    non-zero literal or `NonZero`; overflow as an error).
-2. Stateless `app` declarations with typed routes, `cairn serve`, request checking and response
-   projection, the `X-Cairn-Namespace` header; the store split; instant deploys across several
-   local instances.
+2. Stateless `app` declarations with typed routes (path parameters, query, body), `cairn serve`,
+   request checking and response projection, per-request evaluation budgets, the
+   `X-Cairn-Namespace` header; the store split; instant deploys across several local instances.
 3. Computed API versions, and `cairn deploy --dry-run`.
-4. Stateful apps: `init` and `Model` on a single instance, the migration requirement for `Model`,
-   totality checks, the migration log, the transactional switch, `fix` declarations and required
-   migration tests.
-5. The rollback rule and the state counter.
-6. Commands and `onMsg`, with `Msg` migrations.
+4. Stateful apps: `init` and `Model` on a single instance, the one-at-a-time request queue, the
+   migration requirement for `Model`, totality checks, the migration log, the transactional switch
+   and two-phase deploy, `fix` declarations and required migration tests.
+5. The rollback rule (including returning migration logs to pending) and the state counter.
+6. Commands, `Await` and `onMsg`, with `Msg` migrations, commands tagged by deploy, and the 503
+   rule for continuations waiting across a state change.
 7. Replay against recorded requests; OpenAPI generation; HTTP caching.
-8. Several major versions and canaries for stateless apps.
+8. Several major versions and canaries, for stateless apps and for stateful apps whose versions
+   share the same `Model` type.
 
 ## Open questions
 
