@@ -948,6 +948,77 @@ all of the benefit without that machinery.
 - **Solver reasoning over floats**: properties about money-like values should use `decimal`,
   where proofs are fast and sound (section 1, item 7).
 
+## 12. Code review
+
+Producing changes is getting cheap, especially with AI writing code; reading them is not. Cairn's
+aim is to change *what* a reviewer has to read, not only how fast.
+
+### What Cairn already gives reviewers
+
+- **No noise from formatting or renames:** they do not change hashes, so they are not changes.
+- **Edited vs rehashed:** `update` separates definitions whose source changed (`~ fee`) from those
+  rehashed only because something they use changed (`↻ total via total ← fee`). Only the first
+  contain new code.
+- **Exact impact:** `cairn dependents` and the `via` paths show everything affected, and why.
+- **Evidence before review:** tests run at staging; coverage, mutation testing and `cairn risks`
+  show where evidence is thin.
+- **Explicit risk:** `partial`, bindings, migrations and `fix` are marked in the code.
+
+### Approvals are cached facts about hashes
+
+An approval states "this hash was reviewed", so it is cached like a test result:
+
+- unchanged code is never reviewed twice, and renames and reformatting keep their approval;
+- reverting restores old hashes, and their approvals with them;
+- a definition rehashed only because a dependency changed **inherits** approval: reviewing `fee`
+  covers `total`, whose own source did not change.
+
+A deploy then reports what actually needs reading: *"review needed: 2 definitions; 14 already
+approved; 5 rehashed only."* A project can make approvals part of the deploy gate in `cairn.json`.
+
+### Behaviour diffs
+
+Code is pure, so Cairn can safely run the old and new version of a changed definition on the same
+inputs (examples from existing tests, recorded requests, and later inputs generated from types) and
+show where they differ:
+
+```
+fee: changed behaviour
+  total < 100:  old 0.5   new 1      (inputs: { qty: 1, price: 50 }, ...)
+  total ≥ 100:  unchanged on 200 inputs
+```
+
+The reviewer's question becomes "is this the behaviour change I intended?", which is faster to
+answer than reading code and inferring it, and it catches changes meant to be refactors.
+
+### A review queue ordered by risk
+
+`cairn review` lists what needs attention, riskiest first: migrations and `fix`, one-way state
+changes (the state counter moves), breaking API changes (a major version), `partial` code, plugin
+bindings, surviving mutants, untested code. Last come low-risk changes: total, fully tested, every
+mutant killed, behaviour diff empty or as expected, a patch version.
+
+A project can opt into **auto-approving that last tier** in `cairn.json`, like its coverage and
+mutation minimums, so people spend their attention on what machines cannot verify: intent,
+design, naming, and the risky parts.
+
+### Review bundles for AI reviewers
+
+Everything above is structured data about hashes: what was edited, why dependents changed,
+behaviour diffs, evidence, risks and the computed version. An AI reviewer receives that bundle
+instead of a text diff, and its verdicts are cached by hash like human approvals. A sensible policy:
+AI reviews everything; people review what it flags and every high-risk item.
+
+### Review in dependency order
+
+Cairn knows the dependency graph, so a large change splits into independently reviewable units,
+presented leaves first, each read after what it relies on.
+
+### Limits
+
+Whether a change is the right thing to build, whether its names and design make sense, and anything
+inside plugin TypeScript stay human judgment. The aim is to spend review time only on those.
+
 ## Implementation order
 
 **Prototype status.** Steps 2 and 3 exist in a first form. Defs are bound with
@@ -996,6 +1067,9 @@ split, and compare-and-swap between concurrent deployers.
     pinned; then proved `Model` invariants and migration properties; refinement types, starting
     with `decimal`. Declared algebraic laws (`laws f: commutative, ...`), checked like
     properties, and an unordered `fold` that requires them.
+12. Review: approvals cached by hash with inheritance for rehashed-only definitions and
+    `cairn review`; behaviour diffs from test examples and replay, later from generated inputs; the
+    risk-ordered queue and opt-in auto-approval.
 
 ## Open questions
 
