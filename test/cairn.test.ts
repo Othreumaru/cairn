@@ -6,7 +6,7 @@ import { Checker } from "../src/check.js";
 import { emptyState, staleBuiltins, update, upgrade, rename, remove, view } from "../src/codebase.js";
 import { parseExpr, parseProgram } from "../src/parser.js";
 import { showDecl, showExpr } from "../src/pretty.js";
-import { deploy, evaluate, rollback } from "../src/runtime.js";
+import { deploy, evaluate, rollback, runTests } from "../src/runtime.js";
 import { subtype } from "../src/types.js";
 
 const synth = (src: string) => new Checker(() => undefined).synth(parseExpr(src), new Map());
@@ -224,6 +224,39 @@ test("rollback restores the previous live namespace", () => {
   rollback(s);
   assert.equal(evaluate(s, "v").value, "1");
   assert.throws(() => rollback(s), CairnError);
+});
+
+test("tests run when code is staged, so deploy only reads the cache", () => {
+  const s = fresh(`def a(x: number): number = x + 1
+                   def c(x: number): number = x - 1
+                   test ta = a(1) == 2
+                   test tc = c(1) == 0`);
+  assert.ok(deploy(s).accepted);
+  const prev = { ...s.dev };
+  update(s, `def a(x: number): number = 1 + x`);
+  const ran = runTests(s, s.dev, prev, new Set(["a", "ta"])).filter((r) => !r.cached);
+  assert.deepEqual(
+    ran.map((r) => [r.name, r.why]),
+    [["ta", ["ta", "a"]]],
+  );
+  const d = deploy(s);
+  assert.ok(d.accepted);
+  assert.ok(d.runs.every((r) => r.cached), "nothing left to run at deploy time");
+});
+
+test("a test failing at staging time is still staged, and deploy refuses without re-running it", () => {
+  const s = fresh(`def fee(x: number): number = x * 0.01
+                   test t = fee(100) == 1`);
+  assert.ok(deploy(s).accepted);
+  const prev = { ...s.dev };
+  const r = update(s, `def fee(x: number): number = x * 0.1`);
+  assert.ok(r.applied);
+  const [run] = runTests(s, s.dev, prev, new Set(["fee", "t"]));
+  assert.equal(run.result.passed, false);
+  const d = deploy(s);
+  assert.equal(d.accepted, false);
+  assert.ok(d.runs.every((x) => x.cached));
+  assert.equal(evaluate(s, "fee(100)").value, "1", "live unchanged");
 });
 
 // ---------------- versioned builtins ----------------

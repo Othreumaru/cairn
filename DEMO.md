@@ -5,7 +5,7 @@ Output of `sh examples/demo.sh`. Source files for each step are in `examples/`.
 ```text
 
 ────────────────────────────────────────────────────────
-## 1. Load v1 and deploy it (every test is new, so all run)
+## 1. Load v1 (every test is new, so all run as it is staged) and deploy it from the cache
 
 $ cairn update examples/v1.cairn
 impact of examples/v1.cairn:
@@ -26,22 +26,30 @@ impact of examples/v1.cairn:
   + factorial  #f27e85cb  new
   + parity  #99a19c70  new
 
-tests: 8 will run on next deploy (extraFieldsOk, factorial, feeIsOnePercent, lambdaInferred, parity, receiptFormat, subtotalWorks, totalAddsFee), 0 cached
+tests: running 8 now, 0 cached
+    ✓ extraFieldsOk        RAN 0.22ms  (new test)
+    ✓ factorial            RAN 0.10ms  (new test)
+    ✓ feeIsOnePercent      RAN 0.07ms  (new test)
+    ✓ lambdaInferred       RAN 0.02ms  (new test)
+    ✓ parity               RAN 0.03ms  (new test)
+    ✓ receiptFormat        RAN 0.06ms  (new test)
+    ✓ subtotalWorks        RAN 0.00ms  (new test)
+    ✓ totalAddsFee         RAN 0.01ms  (new test)
 dev is now ns#9f7ff2e5
 
 $ cairn deploy
 deploy: dev ns#9f7ff2e5 → live (currently (empty))
   gate:
-    ✓ extraFieldsOk        RAN 0.49ms  (new test)
-    ✓ factorial            RAN 0.20ms  (new test)
-    ✓ feeIsOnePercent      RAN 0.04ms  (new test)
-    ✓ lambdaInferred       RAN 0.03ms  (new test)
-    ✓ parity               RAN 0.05ms  (new test)
-    ✓ receiptFormat        RAN 0.12ms  (new test)
-    ✓ subtotalWorks        RAN 0.01ms  (new test)
-    ✓ totalAddsFee         RAN 0.01ms  (new test)
+    ✓ extraFieldsOk        cached #398df5d5
+    ✓ factorial            cached #f27e85cb
+    ✓ feeIsOnePercent      cached #81ad3d13
+    ✓ lambdaInferred       cached #340f629b
+    ✓ parity               cached #99a19c70
+    ✓ receiptFormat        cached #6ebb5c46
+    ✓ subtotalWorks        cached #0086fa0c
+    ✓ totalAddsFee         cached #0dc58c04
   changes: +16 added, ~0 changed, -0 removed
-  tests: 8 total — 8 ran, 0 served from cache
+  tests: 8 total — 0 ran, 8 served from cache
 
 ACCEPTED — atomic swap: live is now ns#9f7ff2e5
 
@@ -69,7 +77,11 @@ impact of examples/v3-min-fee.cairn:
   ↻ totalAddsFee  #0dc58c04 → #ad9cdf59  re-checked OK, rehashed (via totalAddsFee ← total ← fee)
   ↻ receiptFormat  #6ebb5c46 → #9977ae58  re-checked OK, rehashed (via receiptFormat ← receipt ← total ← fee)
 
-tests: 4 will run on next deploy (feeIsOnePercent, receiptFormat, totalAddsFee, minFeeApplies), 5 cached
+tests: running 4 now, 5 cached
+    ✓ feeIsOnePercent      RAN 0.20ms  (affected via feeIsOnePercent → fee)
+    ✓ minFeeApplies        RAN 0.18ms  (new test)
+    ✓ receiptFormat        RAN 0.08ms  (affected via receiptFormat → receipt → total → fee)
+    ✓ totalAddsFee         RAN 0.02ms  (affected via totalAddsFee → total → fee)
 dev is now ns#2e350d69
 
 $ cairn deploy
@@ -77,21 +89,21 @@ deploy: dev ns#2e350d69 → live (currently ns#9f7ff2e5)
   gate:
     ✓ extraFieldsOk        cached #398df5d5
     ✓ factorial            cached #f27e85cb
-    ✓ feeIsOnePercent      RAN 0.37ms  (affected via feeIsOnePercent → fee)
+    ✓ feeIsOnePercent      cached #e1603cc4
     ✓ lambdaInferred       cached #340f629b
-    ✓ minFeeApplies        RAN 0.16ms  (new test)
+    ✓ minFeeApplies        cached #11f65d3e
     ✓ parity               cached #99a19c70
-    ✓ receiptFormat        RAN 0.15ms  (affected via receiptFormat → receipt → total → fee)
+    ✓ receiptFormat        cached #9977ae58
     ✓ subtotalWorks        cached #0086fa0c
-    ✓ totalAddsFee         RAN 0.06ms  (affected via totalAddsFee → total → fee)
+    ✓ totalAddsFee         cached #ad9cdf59
   changes: +1 added, ~6 changed, -0 removed
-  tests: 9 total — 4 ran, 5 served from cache
+  tests: 9 total — 0 ran, 9 served from cache
 
 ACCEPTED — atomic swap: live is now ns#2e350d69
 
 
 ────────────────────────────────────────────────────────
-## 4. A typo that type-checks: the deploy gate runs the 4 affected tests and rejects it
+## 4. A typo that type-checks: staging runs the 4 affected tests, and the gate rejects it from the cache
 
 $ cairn update examples/v4-bug.cairn
 impact of examples/v4-bug.cairn:
@@ -103,7 +115,12 @@ impact of examples/v4-bug.cairn:
   ↻ totalAddsFee  #ad9cdf59 → #21273940  re-checked OK, rehashed (via totalAddsFee ← total ← fee)
   ↻ receiptFormat  #9977ae58 → #54cb5693  re-checked OK, rehashed (via receiptFormat ← receipt ← total ← fee)
 
-tests: 4 will run on next deploy (feeIsOnePercent, receiptFormat, totalAddsFee, minFeeApplies), 5 cached
+tests: running 4 now, 5 cached
+    ✗ feeIsOnePercent      RAN 0.22ms — evaluated to false  (affected via feeIsOnePercent → fee)
+    ✓ minFeeApplies        RAN 0.15ms  (affected via minFeeApplies → fee)
+    ✗ receiptFormat        RAN 0.12ms — evaluated to false  (affected via receiptFormat → receipt → total → fee)
+    ✗ totalAddsFee         RAN 0.02ms — evaluated to false  (affected via totalAddsFee → total → fee)
+  3 test(s) failing (feeIsOnePercent, receiptFormat, totalAddsFee): staged, but deploy will refuse until they pass
 dev is now ns#498eeec9
 
 $ cairn deploy
@@ -111,15 +128,15 @@ deploy: dev ns#498eeec9 → live (currently ns#2e350d69)
   gate:
     ✓ extraFieldsOk        cached #398df5d5
     ✓ factorial            cached #f27e85cb
-    ✗ feeIsOnePercent      RAN 0.29ms — evaluated to false  (affected via feeIsOnePercent → fee)
+    ✗ feeIsOnePercent      cached #992dbcd7
     ✓ lambdaInferred       cached #340f629b
-    ✓ minFeeApplies        RAN 0.11ms  (affected via minFeeApplies → fee)
+    ✓ minFeeApplies        cached #f69f195e
     ✓ parity               cached #99a19c70
-    ✗ receiptFormat        RAN 0.10ms — evaluated to false  (affected via receiptFormat → receipt → total → fee)
+    ✗ receiptFormat        cached #54cb5693
     ✓ subtotalWorks        cached #0086fa0c
-    ✗ totalAddsFee         RAN 0.03ms — evaluated to false  (affected via totalAddsFee → total → fee)
+    ✗ totalAddsFee         cached #21273940
   changes: +0 added, ~7 changed, -0 removed
-  tests: 9 total — 4 ran, 5 served from cache
+  tests: 9 total — 0 ran, 9 served from cache
 
 REJECTED — 3 test(s) failed: feeIsOnePercent, receiptFormat, totalAddsFee. live unchanged at ns#2e350d69.
 
@@ -218,7 +235,9 @@ impact of examples/v7-loop.cairn:
   + settle  #154f3f53  new
   + settleTerminates  #f366becb  new
 
-tests: 1 will run on next deploy (settleTerminates), 9 cached
+tests: running 1 now, 9 cached
+    ✗ settleTerminates     RAN 6.31ms — stack overflow (possible infinite recursion)  (new test)
+  1 test(s) failing (settleTerminates): staged, but deploy will refuse until they pass
 dev is now ns#147941f7
 
 $ cairn deploy
@@ -231,11 +250,11 @@ deploy: dev ns#147941f7 → live (currently ns#bb5be816)
     ✓ minFeeApplies        cached #11f65d3e
     ✓ parity               cached #99a19c70
     ✓ receiptFormat        cached #9977ae58
-    ✗ settleTerminates     RAN 7.16ms — stack overflow (possible infinite recursion)  (new test)
+    ✗ settleTerminates     cached #f366becb
     ✓ subtotalWorks        cached #0086fa0c
     ✓ totalAddsFee         cached #ad9cdf59
   changes: +2 added, ~0 changed, -0 removed
-  tests: 10 total — 1 ran, 9 served from cache
+  tests: 10 total — 0 ran, 10 served from cache
 
 REJECTED — 1 test(s) failed: settleTerminates. live unchanged at ns#bb5be816.
 
