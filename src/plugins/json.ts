@@ -1,5 +1,5 @@
-import { CairnError, Type } from "../ast.js";
-import type { Value } from "../eval.js";
+import { CairnError, type Type } from "../ast.ts";
+import type { Value } from "../eval.ts";
 
 /**
  * The JSON mapping of Cairn types, shared by the plugins that speak JSON (http, ws).

@@ -1,11 +1,11 @@
-import { CairnError } from "./ast.js";
-import { Checker } from "./check.js";
-import { invert, Namespace, nsId, State, TestResult } from "./codebase.js";
-import { Evaluator, showValue } from "./eval.js";
-import { normalize, short } from "./hash.js";
-import { BUILTINS, currentVersion } from "./builtins.js";
-import { parseExpr } from "./parser.js";
-import { showType } from "./pretty.js";
+import { CairnError } from "./ast.ts";
+import { Checker } from "./check.ts";
+import { invert, type Namespace, nsId, type State, type TestResult } from "./codebase.ts";
+import { Evaluator, showValue } from "./eval.ts";
+import { normalize, short } from "./hash.ts";
+import { BUILTINS, currentVersion } from "./builtins.ts";
+import { parseExpr } from "./parser.ts";
+import { showType } from "./pretty.ts";
 
 /**
  * The runtime owns the `live` namespace. Nothing reaches it except through `deploy`, and

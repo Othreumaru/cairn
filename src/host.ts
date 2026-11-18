@@ -1,10 +1,10 @@
 import { unwatchFile, watchFile } from "node:fs";
-import { boundIn, nsId, State } from "./codebase.js";
-import { Evaluator } from "./eval.js";
-import { short } from "./hash.js";
-import { PLUGINS } from "./plugins/index.js";
-import type { Runtime } from "./plugins/types.js";
-import { load } from "./store.js";
+import { boundIn, nsId, type State } from "./codebase.ts";
+import { Evaluator } from "./eval.ts";
+import { short } from "./hash.ts";
+import { PLUGINS } from "./plugins/index.ts";
+import type { Runtime } from "./plugins/types.ts";
+import { load } from "./store.ts";
 
 /** Evaluation budget for one call into Cairn code from a plugin (a request, a message, ...). */
 const FUEL = 200_000;

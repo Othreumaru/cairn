@@ -1,6 +1,6 @@
-import type { BindingArg, Type } from "../ast.js";
-import type { State } from "../codebase.js";
-import type { Value } from "../eval.js";
+import type { BindingArg, Type } from "../ast.ts";
+import type { State } from "../codebase.ts";
+import type { Value } from "../eval.ts";
 
 /**
  * Plugins connect Cairn to the outside world (HTTP, WebSockets, ...). They are trusted host code,

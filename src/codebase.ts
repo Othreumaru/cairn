@@ -1,12 +1,12 @@
-import { CairnError, Decl, Type } from "./ast.js";
-import { BUILTINS, currentVersion } from "./builtins.js";
-import { Checker } from "./check.js";
-import { builtinsUsed, canon, denormalize, Entry, hashDecls, normalize, sha, short } from "./hash.js";
-import { parseProgram } from "./parser.js";
-import { PLUGINS } from "./plugins/index.js";
-import type { Bound } from "./plugins/types.js";
-import { showDecl, showType } from "./pretty.js";
-import { subtype, typeEq } from "./types.js";
+import { CairnError, type Decl, type Type } from "./ast.ts";
+import { BUILTINS, currentVersion } from "./builtins.ts";
+import { Checker } from "./check.ts";
+import { builtinsUsed, canon, denormalize, type Entry, hashDecls, normalize, sha, short } from "./hash.ts";
+import { parseProgram } from "./parser.ts";
+import { PLUGINS } from "./plugins/index.ts";
+import type { Bound } from "./plugins/types.ts";
+import { showDecl, showType } from "./pretty.ts";
+import { subtype, typeEq } from "./types.ts";
 
 /** name -> hash. A namespace is just a pointer table; code itself is immutable. */
 export type Namespace = Record<string, string>;

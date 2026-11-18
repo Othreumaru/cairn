@@ -70,11 +70,11 @@ export type Decl = {
 };
 
 export class CairnError extends Error {
-  constructor(
-    message: string,
-    public span?: Span,
-    public node?: Expr,
-  ) {
+  span?: Span;
+  node?: Expr;
+  constructor(message: string, span?: Span, node?: Expr) {
     super(message);
+    this.span = span;
+    this.node = node;
   }
 }

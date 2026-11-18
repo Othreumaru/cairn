@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { Binding, CairnError, Decl, DeclKind, Expr, Type } from "./ast.js";
-import { BUILTINS, currentVersion } from "./builtins.js";
+import { type Binding, CairnError, type Decl, type DeclKind, type Expr, type Type } from "./ast.ts";
+import { BUILTINS, currentVersion } from "./builtins.ts";
 
 /**
  * Content addressing.

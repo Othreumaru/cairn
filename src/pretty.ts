@@ -1,5 +1,5 @@
-import { Decl, Expr, Type } from "./ast.js";
-import { PREC } from "./parser.js";
+import { type Decl, type Expr, type Type } from "./ast.ts";
+import { PREC } from "./parser.ts";
 
 export function showType(t: Type): string {
   switch (t.k) {

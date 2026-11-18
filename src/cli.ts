@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
-import { CairnError } from "./ast.js";
-import { declOf, describeChange, emptyState, invert, Namespace, nsId, remove, rename, staleBuiltins, State, transitiveDependents, update, UpdateReport, upgrade, view } from "./codebase.js";
-import { short } from "./hash.js";
-import { deploy, evaluate, rollback, runTests, TestRun } from "./runtime.js";
-import { showType } from "./pretty.js";
-import { host } from "./host.js";
-import { PLUGINS } from "./plugins/index.js";
-import { load, save, stateFile } from "./store.js";
+import { CairnError } from "./ast.ts";
+import { declOf, describeChange, emptyState, invert, type Namespace, nsId, remove, rename, staleBuiltins, type State, transitiveDependents, update, type UpdateReport, upgrade, view } from "./codebase.ts";
+import { short } from "./hash.ts";
+import { deploy, evaluate, rollback, runTests, type TestRun } from "./runtime.ts";
+import { showType } from "./pretty.ts";
+import { host } from "./host.ts";
+import { PLUGINS } from "./plugins/index.ts";
+import { load, save, stateFile } from "./store.ts";
 
 const nsLabel = (id: string | null) => (id ? `ns${short(id)}` : "(empty)");
 

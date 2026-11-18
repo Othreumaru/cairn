@@ -20,7 +20,8 @@ test inferred      = applyTwice(x => x * 3, 2) == 18                     // cont
 
 ## Running it
 
-Requires Node 18+.
+Requires Node 26+, which runs the TypeScript sources directly (type stripping), so there is no
+build step and no loader. `npm install` only fetches TypeScript, for `npm run typecheck`.
 
 ```sh
 npm install

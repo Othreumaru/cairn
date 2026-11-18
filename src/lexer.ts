@@ -1,4 +1,4 @@
-import { CairnError, Span } from "./ast.js";
+import { CairnError, type Span } from "./ast.ts";
 
 export type TokKind = "num" | "str" | "ident" | "kw" | "op" | "eof";
 

@@ -1,6 +1,6 @@
-import { CairnError, Expr } from "./ast.js";
-import { builtin } from "./builtins.js";
-import { Entry, short } from "./hash.js";
+import { CairnError, type Expr } from "./ast.ts";
+import { builtin } from "./builtins.ts";
+import { type Entry, short } from "./hash.ts";
 
 /**
  * Interpreter over hash-form code. Every global is fetched by hash, so a running program
@@ -23,11 +23,10 @@ export class Evaluator {
   private cache = new Map<string, Value>();
   private evaluating = new Set<string>();
   fuel: number;
+  private lookup: (hash: string) => Entry | undefined;
 
-  constructor(
-    private lookup: (hash: string) => Entry | undefined,
-    fuel = 1_000_000,
-  ) {
+  constructor(lookup: (hash: string) => Entry | undefined, fuel = 1_000_000) {
+    this.lookup = lookup;
     this.fuel = fuel;
   }
 

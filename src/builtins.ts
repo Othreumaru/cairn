@@ -1,4 +1,4 @@
-import { CairnError, T, Type } from "./ast.js";
+import { CairnError, T, type Type } from "./ast.ts";
 
 export type BuiltinImpl = (...args: any[]) => any;
 

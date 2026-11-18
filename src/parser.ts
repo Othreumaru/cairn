@@ -1,5 +1,5 @@
-import { BindingArg, CairnError, Decl, Expr, Param, RecEntry, T, Type } from "./ast.js";
-import { lex, Token } from "./lexer.js";
+import { type BindingArg, CairnError, type Decl, type Expr, type Param, type RecEntry, T, type Type } from "./ast.ts";
+import { lex, type Token } from "./lexer.ts";
 
 // Binary operator precedence (higher binds tighter).
 export const PREC: Record<string, number> = {
@@ -21,7 +21,10 @@ export const PREC: Record<string, number> = {
 
 class Parser {
   private pos = 0;
-  constructor(private toks: Token[]) {}
+  private toks: Token[];
+  constructor(toks: Token[]) {
+    this.toks = toks;
+  }
 
   peek(o = 0): Token {
     return this.toks[Math.min(this.pos + o, this.toks.length - 1)];

@@ -1,16 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CairnError, T } from "../src/ast.js";
-import { BUILTINS, BuiltinVersion } from "../src/builtins.js";
-import { Checker } from "../src/check.js";
-import { emptyState, staleBuiltins, update, upgrade, rename, remove, view } from "../src/codebase.js";
-import { parseExpr, parseProgram } from "../src/parser.js";
-import { showDecl, showExpr } from "../src/pretty.js";
-import { deploy, evaluate, rollback, runTests } from "../src/runtime.js";
-import { runtimeFor } from "../src/host.js";
-import { handle } from "../src/plugins/http.js";
-import { frame, parseFrames, ws } from "../src/plugins/ws.js";
-import { subtype } from "../src/types.js";
+import { CairnError, T } from "../src/ast.ts";
+import { BUILTINS, type BuiltinVersion } from "../src/builtins.ts";
+import { Checker } from "../src/check.ts";
+import { emptyState, staleBuiltins, update, upgrade, rename, remove, view } from "../src/codebase.ts";
+import { parseExpr, parseProgram } from "../src/parser.ts";
+import { showDecl, showExpr } from "../src/pretty.ts";
+import { deploy, evaluate, rollback, runTests } from "../src/runtime.ts";
+import { runtimeFor } from "../src/host.ts";
+import { handle } from "../src/plugins/http.ts";
+import { frame, parseFrames, ws } from "../src/plugins/ws.ts";
+import { subtype } from "../src/types.ts";
 
 const synth = (src: string) => new Checker(() => undefined).synth(parseExpr(src), new Map());
 const fresh = (src: string) => {

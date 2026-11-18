@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { emptyState, State } from "./codebase.js";
+import { emptyState, type State } from "./codebase.ts";
 
 /** Where state lives: `$CAIRN_HOME/state.json`, defaulting to `./.cairn`. */
 export const stateFile = () => join(process.env.CAIRN_HOME ?? join(process.cwd(), ".cairn"), "state.json");

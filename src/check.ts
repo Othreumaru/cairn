@@ -1,7 +1,7 @@
-import { CairnError, Expr, T, Type } from "./ast.js";
-import { BUILTINS, builtin, currentVersion } from "./builtins.js";
-import { showExpr, showType } from "./pretty.js";
-import { isPrim, lub, subtype } from "./types.js";
+import { CairnError, type Expr, T, type Type } from "./ast.ts";
+import { BUILTINS, builtin, currentVersion } from "./builtins.ts";
+import { showExpr, showType } from "./pretty.ts";
+import { isPrim, lub, subtype } from "./types.ts";
 
 /**
  * Bidirectional type checking.
@@ -22,11 +22,14 @@ type Locals = ReadonlyMap<string, Type>;
 const err = (msg: string, e: Expr) => new CairnError(msg, e.span, e);
 
 export class Checker {
+  private globals: Globals;
+  private pins: Record<string, number>;
+
   /** @param pins builtin versions to check against (code rebuilt from the store); others use the current version */
-  constructor(
-    private globals: Globals,
-    private pins: Record<string, number> = {},
-  ) {}
+  constructor(globals: Globals, pins: Record<string, number> = {}) {
+    this.globals = globals;
+    this.pins = pins;
+  }
 
   lookup(name: string, locals: Locals, e: Expr): Type {
     const t = locals.get(name) ?? this.globals(name) ?? (name in BUILTINS ? builtin(name, this.pins[name] ?? currentVersion(name)).type : undefined);

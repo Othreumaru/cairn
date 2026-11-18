@@ -1,9 +1,9 @@
 import { createServer } from "node:http";
-import { BindingArg, CairnError, Type } from "../ast.js";
-import type { State } from "../codebase.js";
-import type { Value } from "../eval.js";
-import { CodecError, decode, encode, isData } from "./json.js";
-import type { Bound, Plugin, Runtime } from "./types.js";
+import { type BindingArg, CairnError, type Type } from "../ast.ts";
+import type { State } from "../codebase.ts";
+import type { Value } from "../eval.ts";
+import { CodecError, decode, encode, isData } from "./json.ts";
+import type { Bound, Plugin, Runtime } from "./types.ts";
 
 /**
  * `@http("POST /quote") def quote(req: { body: { ... } }): Out = ...`

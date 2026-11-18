@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { createServer, IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
-import { CairnError } from "../ast.js";
-import type { State } from "../codebase.js";
-import { typeEq } from "../types.js";
-import { CodecError, decode, encode, isData } from "./json.js";
-import type { Bound, Plugin, Runtime } from "./types.js";
+import { CairnError } from "../ast.ts";
+import type { State } from "../codebase.ts";
+import { typeEq } from "../types.ts";
+import { CodecError, decode, encode, isData } from "./json.ts";
+import type { Bound, Plugin, Runtime } from "./types.ts";
 
 /**
  * `@ws("/chat") def chat(msg: In): Out = ...`
