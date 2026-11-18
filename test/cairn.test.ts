@@ -7,7 +7,9 @@ import { emptyState, staleBuiltins, update, upgrade, rename, remove, view } from
 import { parseExpr, parseProgram } from "../src/parser.js";
 import { showDecl, showExpr } from "../src/pretty.js";
 import { deploy, evaluate, rollback, runTests } from "../src/runtime.js";
-import { handle } from "../src/serve.js";
+import { runtimeFor } from "../src/host.js";
+import { handle } from "../src/plugins/http.js";
+import { frame, parseFrames, ws } from "../src/plugins/ws.js";
 import { subtype } from "../src/types.js";
 
 const synth = (src: string) => new Checker(() => undefined).synth(parseExpr(src), new Map());
@@ -351,58 +353,64 @@ test("upgrade is rejected when a new builtin type breaks a caller", () => {
   });
 });
 
-// ---------------- routes and HTTP serving ----------------
+// ---------------- plugins: http ----------------
 
 const api = () => {
   const s = fresh(`
     def account(id: string): { id: string, name: string, secret: string } = { id: id, name: "Ada", secret: "x" }
-    route "GET /accounts/:id" getAccount(req: { params: { id: string } }): { id: string, name: string } = account(req.params.id)
-    route "POST /double" double(req: { body: { n: number } }): { n: number } = { n: req.body.n * 2 }
-    route "GET /search" search(req: { query: { q: string } }): { q: string } = { q: req.query.q }
+    @http("GET /accounts/:id") def getAccount(req: { params: { id: string } }): { id: string, name: string } = account(req.params.id)
+    @http("POST /double") def double(req: { body: { n: number } }): { n: number } = { n: req.body.n * 2 }
+    @http("GET /search") def search(req: { query: { q: string } }): { q: string } = { q: req.query.q }
     def loop(n: number): number = loop(n + 1)
-    route "GET /loop" spin(req: {}): number = loop(0)
+    @http("GET /loop") def spin(req: {}): number = loop(0)
     test doubles = double({ body: { n: 2 } }).n == 4`);
   assert.ok(deploy(s).accepted);
   return s;
 };
+const quiet = () => {};
+const httpCall = (s: ReturnType<typeof emptyState>, m: string, u: string, b = "") => handle(runtimeFor(() => s, quiet), s, m, u, b);
 
-test("a route is a def that tests can call, and its method and path are part of its hash", () => {
+test("a binding is part of the hash, pins the plugin version, and the bound def stays callable from tests", () => {
   const s = api();
   const before = s.dev.double;
-  update(s, `route "PUT /double" double(req: { body: { n: number } }): { n: number } = { n: req.body.n * 2 }`);
+  assert.equal(s.entries[before].binding?.version, 1);
+  update(s, `@http("PUT /double") def double(req: { body: { n: number } }): { n: number } = { n: req.body.n * 2 }`);
   assert.notEqual(s.dev.double, before);
-  assert.equal(view(s, s.dev, "double"), 'route "PUT /double" double(req: { body: { n: number } }): { n: number } = { n: req.body.n * 2 }');
+  assert.equal(view(s, s.dev, "double"), '@http("PUT /double") def double(req: { body: { n: number } }): { n: number } = { n: req.body.n * 2 }');
 });
 
-test("route declarations are checked: request shape, path parameters, data-only types, unique paths", () => {
+test("bindings are checked by their plugin at update time", () => {
   const bad = (src: string, msg: RegExp) => assert.throws(() => update(emptyState(), src), msg);
-  bad(`route "GET /a/:id" a(req: { params: { name: string } }): number = 1`, /must match the path's :segments/);
-  bad(`route "GET /a" a(req: { headers: { x: string } }): number = 1`, /only have 'params', 'query' and 'body'/);
-  bad(`route "GET /a" a(req: { query: { n: number } }): number = 1`, /'query' must be a record of strings/);
-  bad(`route "GET /a" a(req: {}): (x: number) => number = x => x`, /cannot contain functions/);
-  bad(`route "FETCH /a" a(req: {}): number = 1`, /must look like "GET \/path"/);
-  bad(`route "GET /a" a(req: {}): number = 1
-       route "GET /a" b(req: {}): number = 2`, /both handle "GET \/a"/);
+  bad(`@http("GET /a/:id") def a(req: { params: { name: string } }): number = 1`, /must match the path's :segments/);
+  bad(`@http("GET /a") def a(req: { headers: { x: string } }): number = 1`, /only have 'params', 'query' and 'body'/);
+  bad(`@http("GET /a") def a(req: { query: { n: number } }): number = 1`, /'query' must be a record of strings/);
+  bad(`@http("GET /a") def a(req: {}): (x: number) => number = x => x`, /cannot contain functions/);
+  bad(`@http("FETCH /a") def a(req: {}): number = 1`, /expected @http\("METHOD \/path"\)/);
+  bad(`@http("GET /a") def a(req: {}): number = 1
+       @http("GET /a") def b(req: {}): number = 2`, /both bound to @http\("GET \/a"\)/);
+  bad(`@smtp("x") def a(req: {}): number = 1`, /unknown plugin '@smtp'/);
+  bad(`@ws("/a") def a(x: number, y: number): number = x`, /exactly one parameter/);
+  assert.throws(() => parseProgram(`@http("GET /a") test t = true`), /must be followed by a def/);
 });
 
-test("serving: params, query, body, response projection and the namespace header", () => {
+test("http: params, query, body, response projection and the namespace header", () => {
   const s = api();
-  const acc = handle(s, "GET", "/accounts/7", "");
+  const acc = httpCall(s, "GET", "/accounts/7");
   assert.equal(acc.status, 200);
   assert.deepEqual(acc.body, { id: "7", name: "Ada" }, "the undeclared 'secret' field is not sent");
   assert.match(acc.headers["x-cairn-namespace"], /^ns#[0-9a-f]{8}$/);
-  assert.deepEqual(handle(s, "POST", "/double", '{"n": 21}').body, { n: 42 });
-  assert.deepEqual(handle(s, "GET", "/search?q=cairn&extra=1", "").body, { q: "cairn" });
-  update(s, `route "GET /accounts/me" me(req: {}): { id: string } = { id: "me" }`);
+  assert.deepEqual(httpCall(s, "POST", "/double", '{"n": 21}').body, { n: 42 });
+  assert.deepEqual(httpCall(s, "GET", "/search?q=cairn&extra=1").body, { q: "cairn" });
+  update(s, `@http("GET /accounts/me") def me(req: {}): { id: string } = { id: "me" }`);
   assert.ok(deploy(s).accepted);
-  assert.deepEqual(handle(s, "GET", "/accounts/me", "").body, { id: "me" }, "a literal segment wins over :id");
-  assert.deepEqual(handle(s, "GET", "/accounts/7", "").body, { id: "7", name: "Ada" });
+  assert.deepEqual(httpCall(s, "GET", "/accounts/me").body, { id: "me" }, "a literal segment wins over :id");
+  assert.deepEqual(httpCall(s, "GET", "/accounts/7").body, { id: "7", name: "Ada" });
 });
 
-test("serving: bad requests are rejected before any Cairn code runs, and runaway routes give 500", () => {
+test("http: bad requests are rejected before any Cairn code runs, and runaway routes give 500", () => {
   const s = api();
   const r = (m: string, u: string, b = "") => {
-    const x = handle(s, m, u, b);
+    const x = httpCall(s, m, u, b);
     return [x.status, (x.body as { error?: string }).error];
   };
   assert.deepEqual(r("POST", "/double", '{"n": "2"}'), [400, "body.n must be a number"]);
@@ -411,5 +419,57 @@ test("serving: bad requests are rejected before any Cairn code runs, and runaway
   assert.deepEqual(r("GET", "/search"), [400, "query.q is missing"]);
   assert.deepEqual(r("GET", "/nope"), [404, "no route for GET /nope"]);
   assert.equal(r("GET", "/loop")[0], 500);
-  assert.equal(handle(emptyState(), "GET", "/", "").status, 503);
+  assert.equal(httpCall(emptyState(), "GET", "/").status, 503);
+});
+
+// ---------------- plugins: ws ----------------
+
+test("ws frames round-trip, including the 16-bit length form and client masking", () => {
+  for (const text of ["hi", "x".repeat(300)]) {
+    const payload = Buffer.from(text);
+    const mask = Buffer.from([1, 2, 3, 4]);
+    const masked = Buffer.from(payload.map((b, i) => b ^ mask[i % 4]));
+    const plain = frame(0x1, payload);
+    const fromClient = Buffer.concat([plain.subarray(0, plain.length - payload.length), mask, masked]);
+    fromClient[1] |= 0x80;
+    const { frames, rest } = parseFrames(Buffer.concat([fromClient, Buffer.from([0x81])]));
+    assert.equal(frames.length, 1);
+    assert.equal(frames[0].payload.toString(), text);
+    assert.equal(rest.length, 1, "an incomplete frame stays buffered");
+  }
+});
+
+test("ws: a connection survives a deploy that keeps its message types, and is closed when they change", async () => {
+  const s = fresh(`@ws("/greet") def greet(msg: { name: string }): { text: string } = { text: "hello " ++ msg.name }`);
+  assert.ok(deploy(s).accepted);
+  const rt = runtimeFor(() => s, quiet);
+  const port = 40000 + Math.floor(Math.random() * 20000);
+  const server = ws.start!(rt, { port });
+  try {
+    const sock = new WebSocket(`ws://localhost:${port}/greet`);
+    const replies: unknown[] = [];
+    let waiting: ((v: unknown) => void) | undefined;
+    sock.onmessage = (e) => (waiting ? (waiting(JSON.parse(e.data)), (waiting = undefined)) : replies.push(JSON.parse(e.data)));
+    const ask = (msg: string) => new Promise((res) => ((waiting = res), sock.send(msg)));
+    await new Promise((res, rej) => ((sock.onopen = res), (sock.onerror = rej)));
+
+    assert.deepEqual(await ask('{"name": "ada"}'), { text: "hello ada" });
+    assert.deepEqual(await ask('{"name": 1}'), { error: "message.name must be a string" });
+    assert.deepEqual(await ask("nope"), { error: "message is not valid JSON" });
+
+    // Same types, new behaviour: the open connection now talks to the new code.
+    update(s, `@ws("/greet") def greet(msg: { name: string }): { text: string } = { text: "hi " ++ msg.name }`);
+    assert.ok(deploy(s).accepted);
+    assert.deepEqual(await ask('{"name": "ada"}'), { text: "hi ada" });
+
+    // New message type: the connection is closed so the client reconnects with the new types.
+    const prev = structuredClone(s);
+    const closed = new Promise<{ code: number; reason: string }>((res) => (sock.onclose = (e) => res({ code: e.code, reason: e.reason })));
+    update(s, `@ws("/greet") def greet(msg: { first: string }): { text: string } = { text: "hi " ++ msg.first }`);
+    assert.ok(deploy(s).accepted);
+    ws.onLive!(rt, prev, s);
+    assert.deepEqual(await closed, { code: 1012, reason: "message types changed by a deploy; reconnect" });
+  } finally {
+    server.stop();
+  }
 });

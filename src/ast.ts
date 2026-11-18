@@ -47,10 +47,16 @@ export type Expr =
   | { t: "if"; c: Expr; a: Expr; b: Expr; span?: Span }
   | { t: "let"; name: string; type?: Type; value: Expr; body: Expr; span?: Span };
 
-export type DeclKind = "def" | "test" | "route";
+export type DeclKind = "def" | "test";
 
-/** An HTTP endpoint: `route "POST /quote" quote(req: In): Out = ...`. */
-export type Route = { method: string; path: string };
+/** A literal argument to a binding: `@http("POST /quote")`. */
+export type BindingArg = string | number | boolean;
+
+/**
+ * `@plugin(args) def f(...)` attaches a def to a plugin (an HTTP route, a WebSocket path, ...).
+ * The plugin's version is stamped in when the def is staged, and is part of the hash.
+ */
+export type Binding = { plugin: string; version?: number; args: BindingArg[] };
 
 /** A top-level declaration as written in a source file (name-form). */
 export type Decl = {
@@ -60,7 +66,7 @@ export type Decl = {
   body: Expr;
   span: Span;
   builtins?: Record<string, number>; // pinned builtin versions (set when rebuilt from the store); absent = current
-  route?: Route; // set for `route` declarations; part of the hash
+  binding?: Binding; // set for `@plugin(...) def`; part of the hash
 };
 
 export class CairnError extends Error {

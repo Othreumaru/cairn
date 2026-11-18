@@ -5,7 +5,8 @@ import { declOf, describeChange, emptyState, invert, Namespace, nsId, remove, re
 import { short } from "./hash.js";
 import { deploy, evaluate, rollback, runTests, TestRun } from "./runtime.js";
 import { showType } from "./pretty.js";
-import { serve } from "./serve.js";
+import { host } from "./host.js";
+import { PLUGINS } from "./plugins/index.js";
 import { load, save, stateFile } from "./store.js";
 
 const nsLabel = (id: string | null) => (id ? `ns${short(id)}` : "(empty)");
@@ -162,21 +163,31 @@ function main(argv: string[]) {
     }
 
     case "serve": {
-      const i = args.indexOf("--port");
-      const port = i >= 0 ? Number(args[i + 1]) : 3000;
-      if (!Number.isInteger(port) || port <= 0) throw new CairnError("usage: cairn serve [--port N]");
-      serve(stateFile(), port);
+      // --http N / --ws N start those entry-point plugins; --port is short for --http.
+      const ports: Record<string, number> = {};
+      for (const [flag, plugin] of [["--port", "http"], ...Object.keys(PLUGINS).map((p) => [`--${p}`, p])]) {
+        const i = args.indexOf(flag);
+        if (i < 0) continue;
+        const port = Number(args[i + 1]);
+        if (!Number.isInteger(port) || port <= 0) throw new CairnError(`usage: cairn serve [--http N] [--ws N]  (bad port after ${flag})`);
+        ports[plugin] = port;
+      }
+      host(stateFile(), Object.keys(ports).length ? ports : { http: 3000 });
       return undefined; // keep running
     }
 
-    case "routes": {
+    case "bindings": {
       const ns = args.includes("--dev") ? state.dev : state.live ?? {};
       const rows = Object.keys(ns)
         .sort()
         .map((n) => [n, state.entries[ns[n]]] as const)
-        .filter(([, e]) => e.route);
-      if (!rows.length) console.log("no routes");
-      for (const [n, e] of rows) console.log(`${e.route!.method.padEnd(6)} ${e.route!.path.padEnd(24)} ${n}  ${short(ns[n])}`);
+        .filter(([, e]) => e.binding);
+      if (!rows.length) console.log("no bindings");
+      for (const [n, e] of rows) {
+        const b = e.binding!;
+        const at = `@${b.plugin}(${b.args.map((a) => JSON.stringify(a)).join(", ")})`;
+        console.log(`${at.padEnd(28)} ${n.padEnd(14)} ${b.plugin}@${b.version}  ${short(ns[n])}`);
+      }
       return 0;
     }
 
@@ -198,9 +209,9 @@ function main(argv: string[]) {
   view [name...] [--live]     print definitions (rendered from the hashed AST)
   deps <name>                 direct dependencies of a definition
   dependents <name>           everything a change to <name> would affect
-  serve [--port N]            serve the routes in live over HTTP (default port 3000), switching to
-                              each new deploy as it happens
-  routes [--dev]              list the HTTP routes in live (or dev)
+  serve [--http N] [--ws N]   serve the bindings in live through the http and ws plugins (default:
+                              --http 3000), switching to each new deploy as it happens
+  bindings [--dev]            list the plugin bindings in live (or dev)
   upgrade [--dry-run] [--skip-tests]
                               move code pinned to old builtin versions onto the current ones
   rename <old> <new>          rename (free: hashes don't change)

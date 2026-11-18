@@ -3,6 +3,8 @@ import { BUILTINS, currentVersion } from "./builtins.js";
 import { Checker } from "./check.js";
 import { builtinsUsed, canon, denormalize, Entry, hashDecls, normalize, sha, short } from "./hash.js";
 import { parseProgram } from "./parser.js";
+import { PLUGINS } from "./plugins/index.js";
+import type { Bound } from "./plugins/types.js";
 import { showDecl, showType } from "./pretty.js";
 import { subtype, typeEq } from "./types.js";
 
@@ -85,6 +87,15 @@ function builtinChanges(before: Entry, after: Entry): string[] {
     .sort();
 }
 
+/** Defs in `ns` bound to `plugin`, in name order. */
+export function boundIn(state: State, ns: Namespace, plugin: string): Bound[] {
+  return Object.keys(ns)
+    .sort()
+    .map((name) => ({ name, entry: state.entries[ns[name]] }))
+    .filter(({ entry }) => entry.binding?.plugin === plugin && entry.sig.k === "fn")
+    .map(({ name, entry }) => ({ name, hash: entry.hash, sig: entry.sig as Bound["sig"], args: entry.binding!.args }));
+}
+
 // ---------------------------------------------------------------------------
 // The update pipeline: parse -> check -> hash -> find dependents -> re-check -> report
 
@@ -137,6 +148,22 @@ function updateDecls(state: State, decls: Decl[], opts: { dryRun?: boolean }): U
     seen.add(d.name);
   }
 
+  // Bindings written in this file are checked by their plugin and pinned to its current version.
+  // Bindings of stored defs keep the version they were hashed with, like builtins.
+  decls = decls.map((d) => {
+    if (!d.binding || d.binding.version !== undefined) return d;
+    const plugin = PLUGINS[d.binding.plugin];
+    if (!plugin) throw new CairnError(`unknown plugin '@${d.binding.plugin}' (known: ${Object.keys(PLUGINS).map((p) => "@" + p).join(", ")})`, d.span);
+    if (d.sig.k !== "fn") throw new CairnError(`@${d.binding.plugin}(...) can only bind a function`, d.span);
+    try {
+      plugin.checkBinding(d.binding.args, d.sig, d.name);
+    } catch (e) {
+      if (e instanceof CairnError && !e.span) throw new CairnError(e.message, d.span);
+      throw e;
+    }
+    return { ...d, binding: { ...d.binding, version: plugin.version } };
+  });
+
   const dev = state.dev;
   const fileNames = new Set(decls.map((d) => d.name));
 
@@ -175,7 +202,7 @@ function updateDecls(state: State, decls: Decl[], opts: { dryRun?: boolean }): U
 
   // A file decl whose hash changed may be *textually* identical — it just depends on something
   // else in the file that changed. Distinguish "edited" from "rehashed because a dependency moved".
-  const nameLevelKey = (d: Decl) => canon({ kind: d.kind, sig: d.sig, route: d.route, body: normalize(d.body, (n) => ({ t: "var", name: `@${n}` })) });
+  const nameLevelKey = (d: Decl) => canon({ kind: d.kind, sig: d.sig, binding: d.binding, body: normalize(d.body, (n) => ({ t: "var", name: `@${n}` })) });
   const edited = new Set(
     modifiedExisting.filter((n) => nameLevelKey(decls.find((d) => d.name === n)!) !== nameLevelKey(denormalize(state.entries[dev[n]], (h) => names.get(h)))),
   );
@@ -255,14 +282,8 @@ function updateDecls(state: State, decls: Decl[], opts: { dryRun?: boolean }): U
   // --- Commit: new entries are appended; the dev namespace pointers move.
   const nextDev: Namespace = { ...dev };
   for (const [name, entry] of hashed) nextDev[name] = entry.hash;
-  const routeOwner = new Map<string, string>();
-  for (const name of Object.keys(nextDev).sort()) {
-    const r = (hashed.get(name) ?? state.entries[nextDev[name]]).route;
-    if (!r) continue;
-    const key = `${r.method} ${r.path}`;
-    if (routeOwner.has(key)) throw new CairnError(`routes '${routeOwner.get(key)}' and '${name}' both handle "${key}"`);
-    routeOwner.set(key, name);
-  }
+  const withNew: State = { ...state, entries: { ...state.entries, ...Object.fromEntries([...hashed.values()].map((e) => [e.hash, e])) } };
+  for (const plugin of Object.values(PLUGINS)) plugin.checkAll?.(boundIn(withNew, nextDev, plugin.name));
   for (const [name, h] of Object.entries(nextDev)) {
     const entry = hashed.get(name) ?? state.entries[h];
     if (entry.kind !== "test") continue;

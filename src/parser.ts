@@ -1,4 +1,4 @@
-import { CairnError, Decl, Expr, Param, RecEntry, Route, Span, T, Type } from "./ast.js";
+import { BindingArg, CairnError, Decl, Expr, Param, RecEntry, T, Type } from "./ast.js";
 import { lex, Token } from "./lexer.js";
 
 // Binary operator precedence (higher binds tighter).
@@ -54,6 +54,26 @@ class Parser {
 
   decl(): Decl {
     const start = this.peek();
+    if (this.is("@")) {
+      // @plugin(arg, ...) def f(...): R = body
+      this.next();
+      const plugin = this.ident().text;
+      this.expect("(");
+      const args: BindingArg[] = [];
+      while (!this.is(")")) {
+        const a = this.next();
+        if (a.kind === "str" || a.kind === "num") args.push(a.value!);
+        else if (a.kind === "kw" && (a.text === "true" || a.text === "false")) args.push(a.text === "true");
+        else throw new CairnError(`binding arguments must be literals, not '${a.text}'`, a.span);
+        if (!this.is(",")) break;
+        this.next();
+      }
+      this.expect(")");
+      if (!this.is("def")) throw new CairnError(`@${plugin}(...) must be followed by a def`, this.peek().span);
+      const d = this.decl();
+      if (d.body.t !== "lam") throw new CairnError(`@${plugin}(...) can only bind a function: def ${d.name}(...): ...`, d.span);
+      return { ...d, binding: { plugin, args }, span: start.span };
+    }
     if (this.is("test")) {
       this.next();
       const name = this.ident().text;
@@ -88,35 +108,12 @@ class Parser {
       this.endOfDecl();
       return { kind: "def", name, sig, body, span: start.span };
     }
-    if (this.is("route")) {
-      // route "POST /quote" quote(req: In): Out = body   — a def that is also an HTTP endpoint
-      this.next();
-      const spec = this.peek();
-      if (spec.kind !== "str") throw new CairnError(`expected a route like "POST /quote" but found '${spec.text}'`, spec.span);
-      this.next();
-      const route = parseRouteSpec(spec.value as string, spec.span);
-      const name = this.ident().text;
-      const lp = this.expect("(");
-      const params = this.params(true);
-      this.expect(")");
-      this.expect(":");
-      const ret = this.type();
-      this.expect("=");
-      const inner = this.expr();
-      this.endOfDecl();
-      checkRouteTypes(route, params, ret, start.span);
-      const sig = T.fn(
-        params.map((p) => p.type!),
-        ret,
-      );
-      return { kind: "route", name, sig, body: { t: "lam", params, body: inner, span: lp.span }, span: start.span, route };
-    }
-    throw new CairnError(`expected 'def', 'test' or 'route' but found '${start.text}'`, start.span);
+    throw new CairnError(`expected 'def', 'test' or '@binding' but found '${start.text}'`, start.span);
   }
 
   endOfDecl() {
     const t = this.peek();
-    if (t.kind === "eof" || this.is("def") || this.is("test") || this.is("route")) return;
+    if (t.kind === "eof" || this.is("def") || this.is("test") || this.is("@")) return;
     throw new CairnError(`unexpected '${t.text}' after end of declaration`, t.span);
   }
 
@@ -329,41 +326,6 @@ class Parser {
     }
     throw new CairnError(`unexpected '${t.text}'`, t.span);
   }
-}
-
-const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
-
-function parseRouteSpec(spec: string, span: Span): Route {
-  const m = /^([A-Z]+) (\/[^\s]*)$/.exec(spec);
-  if (!m || !METHODS.has(m[1])) throw new CairnError(`a route must look like "GET /path" with one of ${[...METHODS].join(", ")}, not "${spec}"`, span);
-  return { method: m[1], path: m[2] };
-}
-
-export const pathParams = (path: string) => path.split("/").filter((seg) => seg.startsWith(":")).map((seg) => seg.slice(1));
-
-/** Only data can cross the HTTP boundary: no function types anywhere in a request or response. */
-const isData = (t: Type): boolean => (t.k === "fn" ? false : t.k === "record" ? Object.values(t.fields).every(isData) : true);
-
-/**
- * A route takes one request record with optional `params`, `query` and `body`:
- * `params` must name exactly the `:segments` of the path, and `params` and `query` hold strings.
- */
-function checkRouteTypes(route: Route, params: Param[], ret: Type, span: Span) {
-  const at = `route "${route.method} ${route.path}"`;
-  if (params.length !== 1 || params[0].type!.k !== "record")
-    throw new CairnError(`${at} must take exactly one parameter, a request record such as (req: { body: { ... } })`, span);
-  const req = params[0].type as Extract<Type, { k: "record" }>;
-  for (const [f, t] of Object.entries(req.fields)) {
-    if (f !== "params" && f !== "query" && f !== "body") throw new CairnError(`${at}: the request record may only have 'params', 'query' and 'body', not '${f}'`, span);
-    if (!isData(t)) throw new CairnError(`${at}: '${f}' cannot contain functions`, span);
-    if ((f === "params" || f === "query") && (t.k !== "record" || Object.values(t.fields).some((ft) => ft.k !== "string")))
-      throw new CairnError(`${at}: '${f}' must be a record of strings`, span);
-  }
-  const declared = req.fields.params?.k === "record" ? Object.keys(req.fields.params.fields).sort() : [];
-  const inPath = pathParams(route.path).sort();
-  if (declared.join() !== inPath.join())
-    throw new CairnError(`${at}: params { ${declared.join(", ")} } must match the path's :segments { ${inPath.join(", ")} }`, span);
-  if (!isData(ret)) throw new CairnError(`${at}: the response type cannot contain functions`, span);
 }
 
 export function parseProgram(src: string): Decl[] {

@@ -545,7 +545,7 @@ precedent; here they are pluggable, so new ones can be added without changing th
 
 - **Entry points** bring events in: HTTP, WebSockets, cron, queue consumers, a CLI. The plugin
   listens, turns each event into a call of a Cairn function with a typed input, and maps the typed
-  result back out. The prototype's `serve.ts` is this, hard-coded for HTTP.
+  result back out. The prototype's `http` and `ws` plugins are this.
 - **Effects and storage** take things out: outgoing HTTP calls, files, databases, and where a
   stateful app's `Model` lives (in memory, a JSON file, a SQL table). These plugins perform the
   commands Cairn code returns, and keep state.
@@ -585,8 +585,8 @@ def cleanup(now: number): List(Cmd) = ...
 type Model = { visits: number }
 ```
 
-The binding, its arguments and the plugin's version are hashed with the definition, as the
-prototype's `route` method and path are now, so changing a binding changes the hash.
+The binding, its arguments and the plugin's version are hashed with the definition (the prototype
+does this), so changing a binding changes the hash.
 
 ### Resources and environments
 
@@ -732,13 +732,17 @@ command results, needs `--force`.
 
 ## Implementation order
 
-**Prototype status.** A first slice of steps 2 and 3 exists: `route "METHOD /path" name(req: In): Out`
-declarations (a `def` with a method and path, both hashed), `cairn serve`, request checking,
-response projection, the `X-Cairn-Namespace` header and per-request budgets. Instances follow a
-shared state file saved by atomic rename, so one deploy switches every instance in milliseconds
-(`examples/serve-demo.sh`). It differs from the design in that HTTP is built in rather than a
-plugin, routes use a `route` keyword rather than a binding, there is no `Reply`/`Await` yet, the
-store is not split, and there is no compare-and-swap between concurrent deployers.
+**Prototype status.** Steps 2 and 3 exist in a first form. Defs are bound with
+`@plugin(...)` annotations; a binding is checked by its plugin at `update` time and hashed with the
+def, including the plugin's version. Two entry-point plugins implement one interface
+(`src/plugins/types.ts`): `http` (typed request records, request checking, response projection,
+the `X-Cairn-Namespace` header) and `ws` (typed JSON messages; connections live across deploys that
+keep their message types and are closed with 1012 when a deploy changes them). Plugins reach the
+codebase only through a `Runtime` the host provides. Instances follow a shared state file saved by
+atomic rename, so one deploy switches every instance in milliseconds (`examples/serve-demo.sh`).
+Not yet built: logical resources and per-environment config (ports are command-line flags),
+pinning plugins by package hash and upgrading pinned plugin versions, `Reply`/`Await`, the store
+split, and compare-and-swap between concurrent deployers.
 
 1. Tagged unions with `case`, lists and the built-in parameterized types, type aliases (including
    recursive types), and the number rules (`NonZero`, with non-zero literals typed `NonZero`;

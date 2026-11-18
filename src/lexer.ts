@@ -4,10 +4,10 @@ export type TokKind = "num" | "str" | "ident" | "kw" | "op" | "eof";
 
 export type Token = { kind: TokKind; text: string; value?: number | string; span: Span; offset: number };
 
-const KEYWORDS = new Set(["def", "test", "route", "let", "in", "if", "then", "else", "true", "false"]);
+const KEYWORDS = new Set(["def", "test", "let", "in", "if", "then", "else", "true", "false"]);
 
 // Longest operators first so `...` wins over `.`, `==` over `=`, etc.
-const OPS = ["...", "=>", "==", "!=", "<=", ">=", "++", "&&", "||", "(", ")", "{", "}", ",", ":", ".", "=", "<", ">", "+", "-", "*", "/", "%", "!"];
+const OPS = ["...", "=>", "==", "!=", "<=", ">=", "++", "&&", "||", "(", ")", "{", "}", ",", ":", ".", "=", "<", ">", "+", "-", "*", "/", "%", "!", "@"];
 
 export function lex(src: string): Token[] {
   const toks: Token[] = [];
