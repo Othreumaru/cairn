@@ -285,27 +285,38 @@ loses no information, and the new version writes data the old one cannot represe
 
 ## 6. Computed versions
 
-Every deploy is given a semantic version, computed from the change and never typed by hand. The
-namespace hash remains the identity; the version is a readable label for it
-(`ns#2e35… → v2.2.0 (minor: added field lastVisit; rollback safe)`).
+Every deploy is given a version, computed from the change and never typed by hand. The namespace
+hash remains the identity; the version is a readable label for it.
+
+A version has two parts, because two different audiences read it:
+
+```
+v2.3.0+s4
+ └─┬──┘ └┬┘
+   │     └── state counter: for operators (how far back rollback is statically safe)
+   └──────── API version: semver, for clients (what they can rely on)
+```
+
+A deploy log line shows both, with the reasons:
+`ns#2e35… → v2.3.1+s5 (patch: no route types changed; state: removed field lastVisit, one-way)`.
 
 A version must be a function of the code alone, so the same deploy always gets the same version.
-It therefore uses only **static** checks: the value-based rollback check from section 5 depends on
-the state at the moment and never affects a version.
+Both parts therefore use only **static** checks: the value-based rollback check from section 5
+depends on the state at the moment and never affects a version.
 
-Two interfaces are compared against `live`:
+### API version (for clients)
 
-- **API:** the `In` and `Out` types of every route. A route may change compatibly: accepting more
-  (`old In <: new In`) and returning less (`new Out <: old Out`), exactly the existing function
-  subtyping rule.
-- **State:** the `Model` and `Msg` types, with the static rollback rule (`S <: T`).
+Semantic versioning over **route types only**: the `In` and `Out` types of every route. A route may
+change compatibly by accepting more (`old In <: new In`) and returning less (`new Out <: old Out`),
+which is exactly the existing function subtyping rule. Internal definitions and the `Model` never
+affect it.
 
-| Change | Version |
+| Change | API version |
 |---|---|
 | Namespace hash unchanged (renames, reformatting) | no new version |
-| Behaviour only; all types identical | patch |
-| Added routes, compatible route changes, and state rollback is statically safe | minor |
-| A route removed or changed incompatibly, **or** state rollback is not statically safe | major |
+| All route types identical (behaviour or internal changes only) | patch |
+| Added routes, or compatible route changes | minor |
+| A route removed, or changed incompatibly | major |
 
 Types cannot see a change in meaning, so a behaviour change with identical types is labelled a
 patch even if callers care. Two things narrow that gap:
@@ -314,8 +325,24 @@ patch even if callers care. Two things narrow that gap:
   least minor. Added tests do not count.
 - **Replay** (section 8) shows whether real responses would change.
 
-Whether internal state changes should affect the version clients see is an open question
-(see the end of this document).
+### State counter (for operators)
+
+The counter goes up by one on every deploy that rollback cannot statically undo: when the new
+`Model` or `Msg` type is not a subtype of the previous one (`S_new <: S_old` fails). Otherwise it
+stays the same. Stateless apps have no state part.
+
+| Change to `Model` / `Msg` | State counter |
+|---|---|
+| Unchanged, or `new <: old` (a `Model` field added; a `Msg` variant removed) | stays `s4` |
+| Anything else (a `Model` field removed or retyped; a `Msg` variant added) | `s4 → s5` |
+
+Because subtyping is transitive, **rollback to any version with the same state counter is
+statically safe**: every step in between was. Crossing a boundary (`s5` back to `s4`) is only
+allowed if the value check in section 5 passes. So the version label alone answers "can I roll
+back to this?".
+
+The state part is written as semver *build metadata* (`+s4`), which semver tools ignore when
+comparing versions, so clients' tooling only ever sees `2.3.0`.
 
 ### Several major versions at once (later)
 
@@ -323,9 +350,11 @@ All old code remains in the store, so an instance can serve several major versio
 selected per request (`X-Cairn-Version: 2` or a `/v2/...` prefix). Old clients keep working while
 a new major rolls out, and a major is retired when nobody calls it.
 
-This works for **stateless** apps. For a stateful app it does not in general: both majors would
-write the same model, and the old one writes old-type values. Serving an old major of a stateful
-app is only possible if the old major is read-only (its routes may not return a changed model).
+This works for **stateless** apps. For a stateful app, both majors write the same model, so it
+works only when **both use exactly the same `Model` type**, or when the old major is read-only (its
+routes may not return a changed model). Otherwise the old major would write old-type values. Since
+API versions no longer move with state changes, the same-type case is common: a breaking route
+change often leaves the `Model` untouched.
 
 ## 7. Commands
 
@@ -364,24 +393,16 @@ These fall out of the design with little extra work:
 2. Stateless `app` declarations with typed routes, `cairn serve`, request checking and response
    projection, the `X-Cairn-Namespace` header; the store split; instant deploys across several
    local instances.
-3. Computed versions for the API, and `cairn deploy --dry-run`.
+3. Computed API versions, and `cairn deploy --dry-run`.
 4. Stateful apps: `init` and `Model` on a single instance, the migration requirement for `Model`,
    totality checks, the transactional switch and data-fix migrations.
-5. The rollback rule.
+5. The rollback rule and the state counter.
 6. Commands and `onMsg`, with `Msg` migrations.
 7. Replay against recorded requests; OpenAPI generation; HTTP caching.
 8. Several major versions and canaries for stateless apps.
 
 ## Open questions
 
-- **Should internal state changes affect the version clients see?** Removing a `Model` field is
-  invisible to callers, yet under section 6 it is a major version because rollback is no longer
-  statically safe. Two options:
-  - *One version* (as agreed so far): simple, and a major always means "this is a one-way step",
-    but clients see majors that change nothing for them.
-  - *Two versions*, for example `v2.3.0+s4`: the semantic version covers only the API, and a
-    separate state counter goes up on each change that rollback cannot undo. Clients only see
-    changes that affect them; operators still see one-way steps.
 - **Several migration paths.** If more than one chain leads from the live type to the new one,
   should the gate pick the shortest, or require the path to be unique?
 - **Stateful apps across instances.** Where does a stateful app's model live once it outgrows one
