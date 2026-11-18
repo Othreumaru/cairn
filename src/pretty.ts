@@ -87,6 +87,10 @@ export function showExpr(e: Expr, ctx = LOOSE): string {
 
 export function showDecl(d: Decl): string {
   if (d.kind === "test") return `test ${d.name} = ${showExpr(d.body)}`;
+  if (d.route && d.sig.k === "fn" && d.body.t === "lam") {
+    const ps = d.body.params.map((p) => `${p.name}: ${showType(p.type!)}`).join(", ");
+    return `route "${d.route.method} ${d.route.path}" ${d.name}(${ps}): ${showType(d.sig.ret)} = ${showExpr(d.body.body)}`;
+  }
   // Re-sugar `def f(a: A): R = body` when the body is a fully annotated lambda matching the sig.
   if (d.sig.k === "fn" && d.body.t === "lam" && d.body.params.every((p) => p.type)) {
     const ps = d.body.params.map((p) => `${p.name}: ${showType(p.type!)}`).join(", ");

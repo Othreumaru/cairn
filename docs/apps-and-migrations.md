@@ -512,6 +512,14 @@ These fall out of the design with little extra work:
 
 ## Implementation order
 
+**Prototype status.** A first slice of step 2 exists: `route "METHOD /path" name(req: In): Out`
+declarations (a `def` with a method and path, both hashed), `cairn serve`, request checking,
+response projection, the `X-Cairn-Namespace` header and per-request budgets. Instances follow a
+shared state file saved by atomic rename, so one deploy switches every instance in milliseconds
+(`examples/serve-demo.sh`). It differs from the design in that routes are separate declarations
+rather than members of an `app`, there is no `Reply`/`Await` yet, the store is not split, and
+there is no compare-and-swap between concurrent deployers.
+
 1. Tagged unions with `case`, lists and the built-in parameterized types, type aliases (including
    recursive types), and the number rules (division returning `Result` unless the divisor is a
    non-zero literal or `NonZero`; overflow as an error).

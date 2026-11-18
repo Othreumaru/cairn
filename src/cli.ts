@@ -1,20 +1,12 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { CairnError } from "./ast.js";
 import { declOf, describeChange, emptyState, invert, Namespace, nsId, remove, rename, staleBuiltins, State, transitiveDependents, update, UpdateReport, upgrade, view } from "./codebase.js";
 import { short } from "./hash.js";
 import { deploy, evaluate, rollback, runTests, TestRun } from "./runtime.js";
 import { showType } from "./pretty.js";
-
-const HOME = process.env.CAIRN_HOME ?? join(process.cwd(), ".cairn");
-const FILE = join(HOME, "state.json");
-
-const load = (): State => (existsSync(FILE) ? JSON.parse(readFileSync(FILE, "utf8")) : emptyState());
-const save = (s: State) => {
-  mkdirSync(HOME, { recursive: true });
-  writeFileSync(FILE, JSON.stringify(s));
-};
+import { serve } from "./serve.js";
+import { load, save, stateFile } from "./store.js";
 
 const nsLabel = (id: string | null) => (id ? `ns${short(id)}` : "(empty)");
 
@@ -169,6 +161,25 @@ function main(argv: string[]) {
       return 0;
     }
 
+    case "serve": {
+      const i = args.indexOf("--port");
+      const port = i >= 0 ? Number(args[i + 1]) : 3000;
+      if (!Number.isInteger(port) || port <= 0) throw new CairnError("usage: cairn serve [--port N]");
+      serve(stateFile(), port);
+      return undefined; // keep running
+    }
+
+    case "routes": {
+      const ns = args.includes("--dev") ? state.dev : state.live ?? {};
+      const rows = Object.keys(ns)
+        .sort()
+        .map((n) => [n, state.entries[ns[n]]] as const)
+        .filter(([, e]) => e.route);
+      if (!rows.length) console.log("no routes");
+      for (const [n, e] of rows) console.log(`${e.route!.method.padEnd(6)} ${e.route!.path.padEnd(24)} ${n}  ${short(ns[n])}`);
+      return 0;
+    }
+
     case "reset":
       save(emptyState());
       console.log("state reset");
@@ -187,6 +198,9 @@ function main(argv: string[]) {
   view [name...] [--live]     print definitions (rendered from the hashed AST)
   deps <name>                 direct dependencies of a definition
   dependents <name>           everything a change to <name> would affect
+  serve [--port N]            serve the routes in live over HTTP (default port 3000), switching to
+                              each new deploy as it happens
+  routes [--dev]              list the HTTP routes in live (or dev)
   upgrade [--dry-run] [--skip-tests]
                               move code pinned to old builtin versions onto the current ones
   rename <old> <new>          rename (free: hashes don't change)

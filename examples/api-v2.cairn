@@ -1,0 +1,11 @@
+// v2: the fee is never less than 1, the greeting changes, and a new route reports the version.
+
+def fee(o: { qty: number, price: number }): number = max(subtotal(o) * 0.01, 1)
+
+route "GET /greet/:name" greet(req: { params: { name: string } }): { message: string } =
+  { message: "hi " ++ req.params.name ++ "!" }
+
+route "GET /version" version(req: {}): { version: number } = { version: 2 }
+
+test minFeeApplies = quote({ body: { qty: 1, price: 1 } }).fee == 1
+test greets = greet({ params: { name: "ada" } }).message == "hi ada!"

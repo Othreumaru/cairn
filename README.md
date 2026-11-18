@@ -24,7 +24,7 @@ Requires Node 18+.
 
 ```sh
 npm install
-npm test               # 28 unit tests
+npm test               # 32 unit tests
 sh examples/demo.sh    # end-to-end walkthrough (output also in DEMO.md)
 ./cairn                # CLI help
 ```
@@ -44,6 +44,38 @@ The workflow is the Unison "scratch file" model: a source file holds only what y
 
 State lives in `./.cairn/state.json` (override with `CAIRN_HOME`).
 
+## Serving over HTTP
+
+A `route` is a `def` that is also an HTTP endpoint. It takes one request record with optional
+`params` (path parameters), `query` and `body`, and returns the response body:
+
+```
+route "POST /quote" quote(req: { body: { qty: number, price: number } }): { total: number } =
+  { total: subtotal(req.body) + fee(req.body) }
+
+route "GET /greet/:name" greet(req: { params: { name: string } }): { message: string } =
+  { message: "hello, " ++ req.params.name }
+
+test quoteAddsFee = quote({ body: { qty: 100, price: 1 } }).total == 101
+```
+
+```sh
+./cairn serve --port 3001                 # serve the routes in live; repeat on other ports
+./cairn routes                            # list them
+sh examples/serve-demo.sh                 # three instances, one deploy switches all of them
+```
+
+- Requests are checked against the route's request type before any Cairn code runs (400 on a
+  mismatch); responses are projected onto the declared response type, so fields a value carries
+  but its type does not mention (width subtyping) are never sent.
+- Every response carries `X-Cairn-Namespace`, the namespace it was served from.
+- Each instance watches the state file, which is saved by atomic rename, so a `deploy` or
+  `rollback` switches every running instance within milliseconds, without restarts.
+- Each request has an evaluation budget; a runaway route returns 500.
+
+This is the first slice of the design in [`docs/apps-and-migrations.md`](docs/apps-and-migrations.md):
+stateless routes only, served from one shared state file on one machine.
+
 ## How it maps to the design discussion
 
 | Idea | Where | What it does |
@@ -59,6 +91,7 @@ State lives in `./.cairn/state.json` (override with `CAIRN_HOME`).
 | Deploy gate | `runtime.ts`, `cli.ts` | `live` is only written by `deploy`: all tests must pass, then the namespace pointer is swapped atomically. `update` runs the affected tests as soon as code is staged (failing ones are still staged, but block the deploy), so a deploy normally only reads the cache and does no work. `--skip-tests` defers them to the deploy. |
 | Rollback | `runtime.ts` | The previous namespace is just another pointer, and the code it refers to is still in the append-only store. |
 | Versioned builtins | `builtins.ts`, `hash.ts`, `codebase.ts` | Builtins are immutable and versioned; hash-form code pins `name@version`, so a builtin's version is part of every hash that uses it. Publishing a new version changes nothing stored: old code (and rollback targets) keep running the old version. `upgrade` re-hashes the code still pinned to an old version, propagates to dependents, and the next deploy re-runs exactly the tests that reach the changed builtin. Code re-hashed for an unrelated edit keeps its pins. |
+| HTTP routes | `parser.ts`, `serve.ts`, `store.ts` | A `route` is a def with a method and path, both part of its hash. `serve` checks requests against the declared types, projects responses onto them, and follows the state file, so one deploy switches every instance. |
 | Runaway tests | `eval.ts`, `runtime.ts` | Evaluation budget plus stack-overflow capture: a non-terminating test fails the gate instead of hanging it. |
 
 ## Source layout
@@ -76,6 +109,8 @@ src/
   eval.ts       interpreter over hash-form; globals fetched by hash
   codebase.ts   store, namespaces, update pipeline, impact report
   runtime.ts    deploy gate, test cache, rollback, eval
+  serve.ts      HTTP serving of routes in live; request checking, response projection
+  store.ts      loading and atomic saving of the state file
   cli.ts        command line
 test/           unit tests (node:test)
 examples/       v1 … v7 scenario files + demo.sh

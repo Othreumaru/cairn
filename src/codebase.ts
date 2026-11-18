@@ -175,7 +175,7 @@ function updateDecls(state: State, decls: Decl[], opts: { dryRun?: boolean }): U
 
   // A file decl whose hash changed may be *textually* identical — it just depends on something
   // else in the file that changed. Distinguish "edited" from "rehashed because a dependency moved".
-  const nameLevelKey = (d: Decl) => canon({ kind: d.kind, sig: d.sig, body: normalize(d.body, (n) => ({ t: "var", name: `@${n}` })) });
+  const nameLevelKey = (d: Decl) => canon({ kind: d.kind, sig: d.sig, route: d.route, body: normalize(d.body, (n) => ({ t: "var", name: `@${n}` })) });
   const edited = new Set(
     modifiedExisting.filter((n) => nameLevelKey(decls.find((d) => d.name === n)!) !== nameLevelKey(denormalize(state.entries[dev[n]], (h) => names.get(h)))),
   );
@@ -255,6 +255,14 @@ function updateDecls(state: State, decls: Decl[], opts: { dryRun?: boolean }): U
   // --- Commit: new entries are appended; the dev namespace pointers move.
   const nextDev: Namespace = { ...dev };
   for (const [name, entry] of hashed) nextDev[name] = entry.hash;
+  const routeOwner = new Map<string, string>();
+  for (const name of Object.keys(nextDev).sort()) {
+    const r = (hashed.get(name) ?? state.entries[nextDev[name]]).route;
+    if (!r) continue;
+    const key = `${r.method} ${r.path}`;
+    if (routeOwner.has(key)) throw new CairnError(`routes '${routeOwner.get(key)}' and '${name}' both handle "${key}"`);
+    routeOwner.set(key, name);
+  }
   for (const [name, h] of Object.entries(nextDev)) {
     const entry = hashed.get(name) ?? state.entries[h];
     if (entry.kind !== "test") continue;

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { CairnError, Decl, DeclKind, Expr, Type } from "./ast.js";
+import { CairnError, Decl, DeclKind, Expr, Route, Type } from "./ast.js";
 import { BUILTINS, currentVersion } from "./builtins.js";
 
 /**
@@ -26,6 +26,7 @@ export type Entry = {
   deps: string[]; // hashes this entry references (incl. cycle peers)
   localNames: string[]; // original local binder names, in traversal order (metadata, not hashed)
   group?: { hash: string; index: number; members: string[] };
+  route?: Route; // HTTP method and path of a `route`; hashed, so moving an endpoint changes its hash
   origName: string; // metadata only
 };
 
@@ -242,6 +243,7 @@ export function denormalize(entry: Entry, nameOf: (hash: string) => string | und
     body: go(entry.body, new Map()),
     span: { line: 0, col: 0 },
     builtins: Object.keys(builtins).length ? builtins : undefined,
+    route: entry.route,
   };
 }
 
@@ -318,7 +320,7 @@ export function hashDecls(decls: Decl[], external: (name: string) => string | un
       const d = byName.get(name)!;
       const localNames: string[] = [];
       const body = normalize(d.body, resolveFor(d), new Map(), 0, localNames);
-      return { d, body, localNames, payload: { kind: d.kind, sig: d.sig, body } };
+      return { d, body, localNames, payload: { kind: d.kind, sig: d.sig, body, route: d.route } };
     });
 
     let hashes: string[];
@@ -348,6 +350,7 @@ export function hashDecls(decls: Decl[], external: (name: string) => string | un
         deps: [...deps].sort(),
         localNames: n.localNames,
         group: isCycle ? { hash: groupHash!, index: i, members: hashes } : undefined,
+        route: n.d.route,
         origName: n.d.name,
       });
     });

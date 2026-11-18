@@ -1,0 +1,23 @@
+// A small HTTP API. A route is a def that is also an endpoint: the request and response
+// types are checked at the HTTP boundary, and tests call routes like ordinary functions.
+
+def subtotal(o: { qty: number, price: number }): number = o.qty * o.price
+def fee(o: { qty: number, price: number }): number = subtotal(o) * 0.01
+
+route "POST /quote" quote(req: { body: { qty: number, price: number } }): { subtotal: number, fee: number, total: number } =
+  { subtotal: subtotal(req.body), fee: fee(req.body), total: subtotal(req.body) + fee(req.body) }
+
+route "GET /greet/:name" greet(req: { params: { name: string } }): { message: string } =
+  { message: "hello, " ++ req.params.name }
+
+// The stored account has a passwordHash; the route's response type leaves it out, so it is
+// dropped from the JSON even though the value carries it (width subtyping).
+def account(id: string): { id: string, name: string, passwordHash: string } =
+  { id: id, name: "Ada", passwordHash: "9f2c41e0" }
+
+route "GET /accounts/:id" getAccount(req: { params: { id: string } }): { id: string, name: string } =
+  account(req.params.id)
+
+test quoteAddsFee = quote({ body: { qty: 100, price: 1 } }).total == 101
+test greets = greet({ params: { name: "ada" } }).message == "hello, ada"
+test accountName = getAccount({ params: { id: "7" } }).name == "Ada"

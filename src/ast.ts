@@ -47,7 +47,10 @@ export type Expr =
   | { t: "if"; c: Expr; a: Expr; b: Expr; span?: Span }
   | { t: "let"; name: string; type?: Type; value: Expr; body: Expr; span?: Span };
 
-export type DeclKind = "def" | "test";
+export type DeclKind = "def" | "test" | "route";
+
+/** An HTTP endpoint: `route "POST /quote" quote(req: In): Out = ...`. */
+export type Route = { method: string; path: string };
 
 /** A top-level declaration as written in a source file (name-form). */
 export type Decl = {
@@ -57,6 +60,7 @@ export type Decl = {
   body: Expr;
   span: Span;
   builtins?: Record<string, number>; // pinned builtin versions (set when rebuilt from the store); absent = current
+  route?: Route; // set for `route` declarations; part of the hash
 };
 
 export class CairnError extends Error {

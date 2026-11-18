@@ -7,6 +7,7 @@ import { emptyState, staleBuiltins, update, upgrade, rename, remove, view } from
 import { parseExpr, parseProgram } from "../src/parser.js";
 import { showDecl, showExpr } from "../src/pretty.js";
 import { deploy, evaluate, rollback, runTests } from "../src/runtime.js";
+import { handle } from "../src/serve.js";
 import { subtype } from "../src/types.js";
 
 const synth = (src: string) => new Checker(() => undefined).synth(parseExpr(src), new Map());
@@ -348,4 +349,67 @@ test("upgrade is rejected when a new builtin type breaks a caller", () => {
     );
     assert.deepEqual(s.dev, before, "nothing applied");
   });
+});
+
+// ---------------- routes and HTTP serving ----------------
+
+const api = () => {
+  const s = fresh(`
+    def account(id: string): { id: string, name: string, secret: string } = { id: id, name: "Ada", secret: "x" }
+    route "GET /accounts/:id" getAccount(req: { params: { id: string } }): { id: string, name: string } = account(req.params.id)
+    route "POST /double" double(req: { body: { n: number } }): { n: number } = { n: req.body.n * 2 }
+    route "GET /search" search(req: { query: { q: string } }): { q: string } = { q: req.query.q }
+    def loop(n: number): number = loop(n + 1)
+    route "GET /loop" spin(req: {}): number = loop(0)
+    test doubles = double({ body: { n: 2 } }).n == 4`);
+  assert.ok(deploy(s).accepted);
+  return s;
+};
+
+test("a route is a def that tests can call, and its method and path are part of its hash", () => {
+  const s = api();
+  const before = s.dev.double;
+  update(s, `route "PUT /double" double(req: { body: { n: number } }): { n: number } = { n: req.body.n * 2 }`);
+  assert.notEqual(s.dev.double, before);
+  assert.equal(view(s, s.dev, "double"), 'route "PUT /double" double(req: { body: { n: number } }): { n: number } = { n: req.body.n * 2 }');
+});
+
+test("route declarations are checked: request shape, path parameters, data-only types, unique paths", () => {
+  const bad = (src: string, msg: RegExp) => assert.throws(() => update(emptyState(), src), msg);
+  bad(`route "GET /a/:id" a(req: { params: { name: string } }): number = 1`, /must match the path's :segments/);
+  bad(`route "GET /a" a(req: { headers: { x: string } }): number = 1`, /only have 'params', 'query' and 'body'/);
+  bad(`route "GET /a" a(req: { query: { n: number } }): number = 1`, /'query' must be a record of strings/);
+  bad(`route "GET /a" a(req: {}): (x: number) => number = x => x`, /cannot contain functions/);
+  bad(`route "FETCH /a" a(req: {}): number = 1`, /must look like "GET \/path"/);
+  bad(`route "GET /a" a(req: {}): number = 1
+       route "GET /a" b(req: {}): number = 2`, /both handle "GET \/a"/);
+});
+
+test("serving: params, query, body, response projection and the namespace header", () => {
+  const s = api();
+  const acc = handle(s, "GET", "/accounts/7", "");
+  assert.equal(acc.status, 200);
+  assert.deepEqual(acc.body, { id: "7", name: "Ada" }, "the undeclared 'secret' field is not sent");
+  assert.match(acc.headers["x-cairn-namespace"], /^ns#[0-9a-f]{8}$/);
+  assert.deepEqual(handle(s, "POST", "/double", '{"n": 21}').body, { n: 42 });
+  assert.deepEqual(handle(s, "GET", "/search?q=cairn&extra=1", "").body, { q: "cairn" });
+  update(s, `route "GET /accounts/me" me(req: {}): { id: string } = { id: "me" }`);
+  assert.ok(deploy(s).accepted);
+  assert.deepEqual(handle(s, "GET", "/accounts/me", "").body, { id: "me" }, "a literal segment wins over :id");
+  assert.deepEqual(handle(s, "GET", "/accounts/7", "").body, { id: "7", name: "Ada" });
+});
+
+test("serving: bad requests are rejected before any Cairn code runs, and runaway routes give 500", () => {
+  const s = api();
+  const r = (m: string, u: string, b = "") => {
+    const x = handle(s, m, u, b);
+    return [x.status, (x.body as { error?: string }).error];
+  };
+  assert.deepEqual(r("POST", "/double", '{"n": "2"}'), [400, "body.n must be a number"]);
+  assert.deepEqual(r("POST", "/double", "{"), [400, "body is not valid JSON"]);
+  assert.deepEqual(r("POST", "/double"), [400, "body is missing"]);
+  assert.deepEqual(r("GET", "/search"), [400, "query.q is missing"]);
+  assert.deepEqual(r("GET", "/nope"), [404, "no route for GET /nope"]);
+  assert.equal(r("GET", "/loop")[0], 500);
+  assert.equal(handle(emptyState(), "GET", "/", "").status, 503);
 });
