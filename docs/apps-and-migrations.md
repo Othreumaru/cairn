@@ -89,8 +89,11 @@ The app architecture depends on features Cairn does not have yet.
 
    The rules, for division (`/`) and remainder (`%`) alike:
 
-   - **Division by a non-zero literal** (`x / 100`) returns a plain `number`. The checker can see
-     the divisor is not zero, and this is by far the most common division.
+   - **Non-zero number literals have type `NonZero`**, a subtype of `number`, and negating a
+     `NonZero` gives a `NonZero`. `100`, `0.01` and `-5` are `NonZero`; `0` is a `number`.
+   - **Division by a `NonZero`** returns a plain `number`. With the previous rule, this makes
+     `x / 100`, by far the most common division, an ordinary `number` through subtyping, with no
+     special case for literals.
    - **Division by anything else** returns `Result(DivByZero, number)`. A `Result` is not a
      number, and `case` is exhaustive, so the checker makes the code decide what a zero means
      where the division is written:
@@ -105,8 +108,8 @@ The app architecture depends on features Cairn does not have yet.
      Without the `case`, `total / count` is rejected: "expected number, but 'total / count' is
      Result(DivByZero, number) (count may be 0)". `%` works the same way. Shorter forms: `withDefault(0, total / count)`;
      returning the `Result` to the caller; or, in a route, turning `Err` into a 400.
-   - **`nonZero(x)`** returns `Result(IsZero, NonZero)`. Division or remainder by a `NonZero`
-     returns a plain `number`, so a value checked once can be divided by freely.
+   - **`nonZero(x)`** returns `Result(IsZero, NonZero)`, so a value checked once can be divided by
+     freely.
    - **Overflow** is an error raised at the operation that overflowed, never a value. It is too rare
      to justify a `Result` on every multiplication. Inside a migration it is caught by the
      transactional switch (section 4).
@@ -130,7 +133,7 @@ app api = {
       cmds: []
     }),
     "GET /users/:id": (req: { params: { id: string } }, model) =>
-      Await(Http.get("https://users.internal/" ++ req.params.id), (result, model) => Reply({
+      Await(Http.get(service("users"), "/" ++ req.params.id), (result, model) => Reply({
         response: case result of
           Ok(user) => { status: 200, body: { name: user.name } }
           Err(_)   => { status: 502, body: { error: "user service unavailable" } },
@@ -171,6 +174,11 @@ route that owes it. With `Await` the whole endpoint is one expression with one r
 
 ### Running routes
 
+- **The state is always exactly its type.** Each time a route, `onMsg`, migration or `fix` returns
+  a new model, the runtime projects it onto the `Model` type before storing it, as responses are
+  projected onto their declared types. With width subtyping a value can carry fields its type does
+  not mention; projecting means no such hidden field ever survives in the state, and nothing (a
+  rollback check, a migration, a later version) can come to depend on one.
 - **Requests to a stateful app are processed one at a time**, like Elm's update loop: a route (or
   continuation) runs to completion before the next starts, so two requests can never both read
   and overwrite the same model. Routes are pure and synchronous, so this costs little. Waiting for
@@ -203,8 +211,8 @@ line the design already draws:
 
 | Part | Mutability | Requirements |
 |---|---|---|
-| Code store: one entry per hash | append-only | any shared storage; instances cache entries forever |
-| Test cache: one result per test hash | append-only | as above |
+| Code store: one entry per hash | immutable; append-only within the pruning horizon | any shared storage; instances cache entries until they are pruned |
+| Test cache: one result per test hash | as above | as above |
 | `live` pointer and deploy history | mutable | atomic compare-and-swap, so two concurrent deploys cannot both win |
 
 A deploy of a **stateless** app works like this:
@@ -301,8 +309,8 @@ Why a log rather than a graph of migrations between type hashes:
 
 - **There is exactly one sequence.** In a graph, `A → B → C` and a direct `A → C` would both be
   valid paths, and since they are different functions, the migrated state would depend on which
-  path was picked. Edges in an append-only store cannot be deleted, so a stray one could not even
-  be removed.
+  path was picked. Store entries are immutable and only leave the store when pruned (section 10),
+  so a stray edge could not even be removed.
 - **Fixes run.** A `fix` is a step in the log. In a graph it would be a self-loop, and a path search
   from `A` to `A` finds the empty path, so the fix would never run.
 - **Same type at both ends does not mean nothing happened.** After `A → B → A`, the state has been
@@ -380,8 +388,12 @@ type `T`:
 1. **Static:** if `S <: T`, rollback is allowed and safe for any state.
 2. **By value:** otherwise, check the actual live state against `T`. State is plain immutable
    data, so this is exact and cheap. If it fits, rollback is allowed and safe for this state.
-3. **Otherwise:** refused, with the reason (for example, "state field `lastVisit` is missing, but
-   the target expects it"). The user fixes forward.
+3. **Otherwise:** refused, with the reason (for example, "the state contains `Suspended`, a variant
+   the target's `Model` does not have"). The user fixes forward.
+
+Because the state is always projected onto its type (section 2), the value check never depends on
+fields the type does not mention. It is useful where a type allows more than the data uses: which
+union variants actually occur in the state, and which messages are actually pending.
 
 Consequences:
 
@@ -390,7 +402,8 @@ Consequences:
 | Body-only change | allowed |
 | A `fix` | allowed, but the data stays fixed: rollback does not undo migrations or fixes |
 | Added a field (a migration ran) | allowed: `{visits, lastVisit} <: {visits}`, the old code ignores the field |
-| Removed a field | allowed only if the value check finds the field still present |
+| Removed a field | refused: the state no longer has the field, and never keeps fields its type does not mention |
+| Added a union variant (`Active \| Archived` to `Active \| Archived \| Suspended`) | allowed only if the value check finds no `Suspended` in the state |
 | Changed a field's type | refused |
 
 Pending messages follow the same rule: rolling back past a deploy that added `Msg.Reset` is
@@ -401,7 +414,7 @@ of that type from its first request on. Rolling back across a deploy therefore *
 deploy's migration log to the front of the pending log**, so that deploying forward again has a log
 that composes from `T`. Redeploying runs those migrations again. That is type-safe, but data they
 set is set again: redeploying after rolling back past `addLastVisit` resets `lastVisit` to `""`,
-even on records the old code happened to preserve. `cairn deploy --dry-run` (section 8) shows this
+because the rollback projected the state onto `T` and dropped it. `cairn deploy --dry-run` (section 8) shows this
 before it happens.
 
 Rollback is transactional in the same way as deploy, including pausing the request queue.
@@ -568,16 +581,36 @@ def chat(msg: ChatMsg, conn: Conn): List(ChatMsg) = ...
 @cron("*/5 * * * *")
 def cleanup(now: number): List(Cmd) = ...
 
-@store(sqlite("visits.db"))
+@store("visits")
 type Model = { visits: number }
 ```
 
 The binding, its arguments and the plugin's version are hashed with the definition, as the
 prototype's `route` method and path are now, so changing a binding changes the hash.
 
+### Resources and environments
+
+Code names **logical resources**, never environment details: `@store("visits")`, not a database
+file; `service("users")`, not a hostname. A **deployment config**, kept outside the hash and
+written per environment, maps each name to something real:
+
+```
+# production.cairn-env
+store visits = sqlite("/var/lib/app/visits.db")
+service users = "https://users.internal"
+http port = 443
+```
+
+Otherwise pointing the same code at a staging database would change its hash, so the "same" app
+would be different code in each environment, and a hash tested in staging could not be promoted to
+production. With the split, the namespace hash means the same behaviour everywhere, and only the
+config differs. The prototype already works this way for ports: `cairn serve --port` is a flag, not
+code. The gate checks that every resource the code names is mapped in the target environment's
+config before a deploy.
+
 ### How plugins fit the rest of the design
 
-- **Plugin versions are pinned like builtins.** A plugin's mapping is observable behaviour (how a
+- **Plugins are pinned like builtins.** A plugin's mapping is observable behaviour (how a
   number is encoded, how a type becomes a table), so a binding records `http@2` in its hash, and
   moving to `http@3` goes through `cairn upgrade`, exactly like `round2@1 → 2`.
 - **Tests stay pure.** Plugins only act at the edges: tests call bound functions directly, and
@@ -621,11 +654,15 @@ interface CairnPlugin {
 }
 ```
 
-### Trust
+### Trust and identity
 
-Plugins are TypeScript, not Cairn, so they are neither content-addressed nor sandboxed: they are
-**trusted host code**, like Elm's kernel modules. Their identity is still `name@version`, ideally
-pinned by a hash of the package, so a deploy remains fully determined by hashes.
+Plugins are TypeScript, not Cairn, so they are not sandboxed: they are **trusted host code**, like
+Elm's kernel modules. They are still identified exactly: a plugin's identity is
+`name@version` **plus a hash of its package**, and both are recorded in the hash of every binding
+that uses it. Two machines with different builds of `http@2` would otherwise behave differently
+under the same namespace hash, and since plugins also run checks at `update` time, even staging
+would depend on unpinned code. A runtime refuses to load a plugin whose package hash does not
+match the one the namespace names.
 
 ## 10. Pruning
 
@@ -647,6 +684,10 @@ horizon at `v2.3.0+s4`:
 | Migration logs and old `Msg` migrations | deleted |
 | Older majors | retired; clients still pinned to them get `410 Gone` |
 | Code only those things used | garbage-collected from the store |
+
+This does not weaken immutability. A hash never changes meaning: pruning can make an entry
+**unavailable**, never different. The store is immutable, and append-only within the horizon;
+"immutable, not eternal".
 
 The snapshot is the same idea as **squashing migrations** in database tools (Django's
 `squashmigrations`, Rails' `schema.rb`): the state at the horizon becomes the new starting point,
@@ -700,8 +741,8 @@ plugin, routes use a `route` keyword rather than a binding, there is no `Reply`/
 store is not split, and there is no compare-and-swap between concurrent deployers.
 
 1. Tagged unions with `case`, lists and the built-in parameterized types, type aliases (including
-   recursive types), and the number rules (division returning `Result` unless the divisor is a
-   non-zero literal or `NonZero`; overflow as an error).
+   recursive types), and the number rules (`NonZero`, with non-zero literals typed `NonZero`;
+   division returning `Result` unless the divisor is a `NonZero`; overflow as an error).
 2. Stateless HTTP routes with typed requests (path parameters, query, body), `cairn serve`,
    request checking and response projection, per-request evaluation budgets, the
    `X-Cairn-Namespace` header; the store split; instant deploys across several local instances.
@@ -731,8 +772,8 @@ store is not split, and there is no compare-and-swap between concurrent deployer
 - **Binding syntax.** Annotations on each definition (`@http("POST /quote") def quote ...`, as in
   section 9), or bindings grouped in an `app` block (as in section 2)? Annotations keep one syntax
   for every plugin; an `app` block keeps an app's model and its routes together.
-- **Plugin trust and distribution.** Plugins are trusted host code for now. How are they packaged
-  and pinned, and is sandboxing (for example, running plugins in a separate process with only the
-  capabilities they declare) worth it later?
+- **Plugin distribution and sandboxing.** Plugins are pinned by package hash (section 9). How are
+  they packaged and fetched, and is sandboxing (for example, running plugins in a separate process
+  with only the capabilities they declare) worth it later?
 - **Expired results.** Should a command result that arrives after its horizon be dropped silently
   (and logged), or delivered as a typed `Expired` value that code must handle?
