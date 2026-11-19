@@ -42,8 +42,8 @@ export type Expr =
   | { t: "call"; fn: Expr; args: Expr[]; span?: Span }
   | { t: "field"; obj: Expr; name: string; span?: Span }
   | { t: "rec"; entries: RecEntry[]; span?: Span }
-  | { t: "bin"; op: string; l: Expr; r: Expr; span?: Span }
-  | { t: "un"; op: "-" | "!"; e: Expr; span?: Span }
+  | { t: "bin"; op: string; v?: number; l: Expr; r: Expr; span?: Span } // hash-form: `v` pins the operator version, absent = 1
+  | { t: "un"; op: "-" | "!"; v?: number; e: Expr; span?: Span }
   | { t: "if"; c: Expr; a: Expr; b: Expr; span?: Span }
   | { t: "let"; name: string; type?: Type; value: Expr; body: Expr; span?: Span };
 
@@ -65,7 +65,8 @@ export type Decl = {
   sig: Type; // tests always have sig = boolean
   body: Expr;
   span: Span;
-  builtins?: Record<string, number>; // pinned builtin versions (set when rebuilt from the store); absent = current
+  builtins?: Record<string, number>; // pinned builtin and operator versions (set when rebuilt from the store); absent = current
+  edition?: number; // the edition the code was written for (set when rebuilt from the store); absent = see updateDecls
   binding?: Binding; // set for `@plugin(...) def`; part of the hash
   partial?: true; // `partial def`: may recurse, and so may not terminate; part of the hash
 };

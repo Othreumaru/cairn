@@ -78,7 +78,8 @@ const replaceAt = (e: Expr, path: number[], f: (n: Expr) => Expr): Expr =>
 function mutationsOf(e: Expr): [string, (n: Expr) => Expr][] {
   switch (e.t) {
     case "bin":
-      return SWAP[e.op] ? [[`'${e.op}' → '${SWAP[e.op]}'`, (n) => ({ ...(n as typeof e), op: SWAP[e.op] })]] : [];
+      // The replacement is version 1 of the other operator: the original's pinned version is its own.
+      return SWAP[e.op] ? [[`'${e.op}' → '${SWAP[e.op]}'`, (n) => ({ ...(n as typeof e), op: SWAP[e.op], v: undefined })]] : [];
     case "un":
       return e.op === "!" ? [["'!' removed", (n) => (n as typeof e).e]] : [];
     case "if":

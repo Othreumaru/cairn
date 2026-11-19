@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { CairnError } from "./ast.ts";
-import { declOf, describeChange, emptyState, invert, type Namespace, nsId, remove, rename, staleBuiltins, type State, transitiveDependents, update, type UpdateReport, upgrade, view } from "./codebase.ts";
+import { declOf, describeChange, emptyState, invert, type Namespace, nsId, remove, rename, staleBuiltins, staleEdition, type State, transitiveDependents, update, type UpdateReport, upgrade, view } from "./codebase.ts";
 import { short } from "./hash.ts";
-import { deploy, evaluate, rollback, runTests, type TestRun } from "./runtime.ts";
+import { deploy, evaluate, recheck, rollback, runTests, type TestRun } from "./runtime.ts";
 import { showType } from "./pretty.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { coverage, type CoverageReport, describeCoverage } from "./coverage.ts";
@@ -106,8 +106,23 @@ function main(argv: string[]) {
       return printUpdate(state, prevDev, update(state, readFileSync(file, "utf8"), { dryRun }), `impact of ${file}`, dryRun, skipTests, config);
     }
 
-    case "upgrade":
-      return printUpdate(state, prevDev, upgrade(state, { dryRun }), "upgrading definitions pinned to old builtin versions", dryRun, skipTests, config);
+    case "upgrade": {
+      const edition = args.includes("--edition");
+      const title = edition ? "upgrading definitions written for an older edition" : "upgrading definitions pinned to old builtin or operator versions";
+      return printUpdate(state, prevDev, upgrade(state, { dryRun, edition }), title, dryRun, skipTests, config);
+    }
+
+    case "recheck": {
+      const r = recheck(state);
+      for (const m of r.mismatches)
+        console.log(`  ✗ ${m.name.padEnd(20)} ${short(m.hash)}  cached: ${m.cached.passed ? "passed" : "failed"} (${m.cached.detail}); now: ${m.now.passed ? "passed" : "failed"} (${m.now.detail})`);
+      if (r.mismatches.length) {
+        console.log(`${r.mismatches.length} of ${r.checked} cached test results differ under this runtime: it changes the meaning of stored code`);
+        return 1;
+      }
+      console.log(`all ${r.checked} cached test results reproduce under this runtime`);
+      return 0;
+    }
 
     case "deploy": {
       console.log(`deploy: dev ${nsLabel(nsId(state.dev))} → live (currently ${nsLabel(state.live ? nsId(state.live) : null)})`);
@@ -157,7 +172,7 @@ function main(argv: string[]) {
       const ns = args.includes("--live") ? state.live ?? {} : state.dev;
       for (const n of rest.length ? rest : Object.keys(ns).sort()) {
         const stale = n in ns ? staleBuiltins(state.entries[ns[n]]) : [];
-        console.log(`${short(ns[n])}  ${view(state, ns, n)}${stale.length ? `  -- pinned to old builtins: ${stale.join(", ")}` : ""}`);
+        console.log(`${short(ns[n])}  ${view(state, ns, n)}${stale.length ? `  -- pinned to old versions: ${stale.join(", ")}` : ""}`);
       }
       return 0;
     }
@@ -199,7 +214,9 @@ function main(argv: string[]) {
       console.log(`live: ${nsLabel(state.live ? nsId(state.live) : null)}${state.live ? `  (${Object.keys(state.live).length} names)` : ""}`);
       console.log(`deploy history: ${state.history.length} previous version(s); cached test results: ${Object.keys(state.testCache).length}`);
       const stale = Object.keys(state.dev).filter((n) => staleBuiltins(state.entries[state.dev[n]]).length);
-      if (stale.length) console.log(`pinned to old builtin versions: ${stale.sort().join(", ")} (run \`cairn upgrade\`)`);
+      if (stale.length) console.log(`pinned to old builtin or operator versions: ${stale.sort().join(", ")} (run \`cairn upgrade\`)`);
+      const oldEdition = Object.keys(state.dev).filter((n) => staleEdition(state.entries[state.dev[n]]));
+      if (oldEdition.length) console.log(`written for an older edition: ${oldEdition.sort().join(", ")} (run \`cairn upgrade --edition\`)`);
       return 0;
     }
 
@@ -304,8 +321,12 @@ function main(argv: string[]) {
                               check a test fails for each. The deploy gate enforces cairn.json's
                               { "mutation": { "minimum": 70 } } when set; --min-mutation N
                               overrides it
-  upgrade [--dry-run] [--skip-tests]
-                              move code pinned to old builtin versions onto the current ones
+  upgrade [--edition] [--dry-run] [--skip-tests]
+                              move code pinned to old builtin or operator versions onto the
+                              current ones; --edition: move code written for an older edition
+                              onto the current edition instead
+  recheck                     re-run every cached test and check this runtime reproduces each
+                              result (run before releasing a runtime)
   rename <old> <new>          rename (free: hashes don't change)
   delete <name>               remove a name (refused if anything depends on it)
   status | reset`);

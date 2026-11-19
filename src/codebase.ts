@@ -1,5 +1,5 @@
 import { CairnError, type Decl, type Type } from "./ast.ts";
-import { BUILTINS, currentVersion } from "./builtins.ts";
+import { BUILTINS, currentVersion, EDITIONS } from "./builtins.ts";
 import { Checker } from "./check.ts";
 import { builtinsUsed, canon, denormalize, type Entry, hashDecls, normalize, sha, short } from "./hash.ts";
 import { parseProgram } from "./parser.ts";
@@ -71,7 +71,7 @@ export function view(state: State, ns: Namespace, name: string): string {
   return showDecl(declOf(state, ns, name));
 }
 
-/** Builtin versions an entry was hashed against that are no longer current, e.g. `round2@1→2`. */
+/** Builtin and operator versions an entry was hashed against that are no longer current, e.g. `round2@1→2` or `/@1→2`. */
 export function staleBuiltins(entry: Entry): string[] {
   return Object.entries(builtinsUsed(entry.body))
     .filter(([n, v]) => v !== currentVersion(n))
@@ -79,14 +79,21 @@ export function staleBuiltins(entry: Entry): string[] {
     .sort();
 }
 
-/** Builtins whose pinned version differs between two hashings of the same definition. */
+/** The edition an entry was written for, when it is older than the current one. */
+export const staleEdition = (entry: Entry): boolean => (entry.edition ?? 1) !== EDITIONS.current;
+
+/** What moved between two hashings of the same definition: pinned builtin and operator versions, and the edition. */
 function builtinChanges(before: Entry, after: Entry): string[] {
   const a = builtinsUsed(before.body);
   const b = builtinsUsed(after.body);
-  return Object.keys(b)
-    .filter((n) => n in a && a[n] !== b[n])
-    .map((n) => `${n}@${a[n]}→${b[n]}`)
-    .sort();
+  const edition = (before.edition ?? 1) !== (after.edition ?? 1) ? [`edition ${before.edition ?? 1}→${after.edition ?? 1}`] : [];
+  return [
+    ...Object.keys(b)
+      .filter((n) => n in a && a[n] !== b[n])
+      .map((n) => `${n}@${a[n]}→${b[n]}`)
+      .sort(),
+    ...edition,
+  ];
 }
 
 /** Defs in `ns` bound to `plugin`, in name order. */
@@ -106,7 +113,7 @@ export type ChangeKind =
   | { k: "alias"; of: string }
   | { k: "unchanged" }
   | { k: "modified"; typeChange: "none" | "compatible" | "incompatible"; oldType: Type; newType: Type; builtins: string[] }
-  | { k: "upgraded"; builtins: string[] } // same source, rehashed onto newer builtin versions
+  | { k: "upgraded"; builtins: string[] } // same source, rehashed onto newer builtin or operator versions, or a newer edition
   | { k: "propagated"; via: string[] }
   | { k: "broken"; error: string; via: string[] };
 
@@ -126,13 +133,23 @@ export function update(state: State, source: string, opts: { dryRun?: boolean } 
 }
 
 /**
- * Move every definition still pinned to an old builtin version onto the current one.
- * The stale definitions go through the normal update pipeline as if they had been
- * re-submitted unchanged, so their dependents are re-checked and rehashed, and the next
- * deploy re-runs exactly the tests that reach an upgraded builtin.
+ * Move every definition still pinned to an old builtin or operator version onto the current one,
+ * or with `edition`, every definition written for an older edition onto the current edition
+ * (and nothing else). The stale definitions go through the normal update pipeline as if they had
+ * been re-submitted unchanged, so they are re-checked under the new rules, their dependents are
+ * re-checked and rehashed, and the next deploy re-runs exactly the tests that reach them.
  */
-export function upgrade(state: State, opts: { dryRun?: boolean } = {}): UpdateReport {
-  const stale = Object.keys(state.dev).filter((n) => staleBuiltins(state.entries[state.dev[n]]).length);
+export function upgrade(state: State, opts: { dryRun?: boolean; edition?: boolean } = {}): UpdateReport {
+  const entry = (n: string) => state.entries[state.dev[n]];
+  if (opts.edition) {
+    const stale = Object.keys(state.dev).filter((n) => staleEdition(entry(n)));
+    return updateDecls(
+      state,
+      stale.map((n) => ({ ...declOf(state, state.dev, n), edition: EDITIONS.current })),
+      opts,
+    );
+  }
+  const stale = Object.keys(state.dev).filter((n) => staleBuiltins(entry(n)).length);
   return updateDecls(
     state,
     stale.map((n) => ({ ...declOf(state, state.dev, n), builtins: undefined })),
@@ -167,6 +184,9 @@ function updateDecls(state: State, decls: Decl[], opts: { dryRun?: boolean }): U
   });
 
   const dev = state.dev;
+  // Moving to a new edition is always explicit: a file that replaces a def keeps that def's
+  // edition, and only new defs are written for the current one.
+  decls = decls.map((d) => (d.edition !== undefined ? d : { ...d, edition: d.name in dev ? (state.entries[dev[d.name]].edition ?? 1) : EDITIONS.current }));
   const fileNames = new Set(decls.map((d) => d.name));
 
   // --- Pass A: check & hash the file on its own, to learn which names really changed.
@@ -367,10 +387,10 @@ function describeChangeKind(c: Change): string {
           : k.typeChange === "compatible"
             ? `type changed compatibly: ${showType(k.oldType)}  ⟶  ${showType(k.newType)} (new <: old)`
             : `type changed INCOMPATIBLY: ${showType(k.oldType)}  ⟶  ${showType(k.newType)}`;
-      return `~ ${c.name}  ${arrow}  ${t}${k.builtins.length ? `; builtins upgraded: ${k.builtins.join(", ")}` : ""}`;
+      return `~ ${c.name}  ${arrow}  ${t}${k.builtins.length ? `; upgraded: ${k.builtins.join(", ")}` : ""}`;
     }
     case "upgraded":
-      return `^ ${c.name}  ${arrow}  source unchanged, builtins upgraded: ${k.builtins.join(", ")}`;
+      return `^ ${c.name}  ${arrow}  source unchanged, upgraded: ${k.builtins.join(", ")}`;
     case "propagated":
       return c.newHash
         ? `↻ ${c.name}  ${arrow}  re-checked OK, rehashed (via ${k.via.join(" ← ")})`

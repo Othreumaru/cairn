@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
 import { type Binding, CairnError, type Decl, type DeclKind, type Expr, type Type } from "./ast.ts";
-import { BUILTINS, currentVersion } from "./builtins.ts";
+import { BUILTINS, checkEdition, currentVersion, EDITIONS } from "./builtins.ts";
+import { unaryKey } from "./operators.ts";
 
 /**
  * Content addressing.
  *
  * A definition's hash is computed from its *normalised* AST:
  *   - references to other definitions are replaced by their hashes,
- *   - references to builtins carry the builtin's version,
+ *   - references to builtins, and operators other than version 1, carry their version,
+ *   - a definition's edition is included when it is not edition 1,
  *   - local binders are renamed to their de Bruijn level (`_0`, `_1`, …),
  *   - spans/whitespace/comments are gone, record literal fields are sorted.
  * So renaming a parameter, reformatting, or renaming a *dependency* never changes a hash,
@@ -28,6 +30,7 @@ export type Entry = {
   group?: { hash: string; index: number; members: string[] };
   binding?: Binding; // plugin, plugin version and arguments; hashed, so rebinding changes the hash
   partial?: true; // `partial def`; hashed, so marking or unmarking changes the hash
+  edition?: number; // the edition the code was written for; absent = 1, and only hashed when not 1
   origName: string; // metadata only
 };
 
@@ -92,9 +95,11 @@ export function freeGlobals(e: Expr, bound: ReadonlySet<string> = new Set(), out
   return out;
 }
 
-/** Builtin versions referenced by a hash-form body: name -> version. */
+/** Builtin and operator versions referenced by a hash-form body: name -> version. */
 export function builtinsUsed(e: Expr, out: Record<string, number> = {}): Record<string, number> {
   if (e.t === "builtin") out[e.name] = e.v;
+  else if (e.t === "bin") out[e.op] = e.v ?? 1;
+  else if (e.t === "un") out[unaryKey(e.op)] = e.v ?? 1;
   for (const v of Object.values(e))
     if (v && typeof v === "object") {
       if (Array.isArray(v)) v.forEach((x) => x && typeof x === "object" && ("t" in x ? builtinsUsed(x as Expr, out) : "value" in x ? builtinsUsed((x as { value: Expr }).value, out) : 0));
@@ -107,6 +112,11 @@ export function builtinsUsed(e: Expr, out: Record<string, number> = {}): Record<
 // name-form -> hash-form
 
 type Resolve = (name: string) => Expr; // returns a ref / cref / builtin node
+/** The version to pin an operator to: by its pinned name (see `unaryKey`). */
+type OpVersion = (name: string) => number;
+
+/** Version 1 is left out, so code from before operators were versioned keeps its hash. */
+const pinned = (v: number) => (v === 1 ? {} : { v });
 
 function sortRecord(e: Extract<Expr, { t: "rec" }>) {
   return e.entries.every((en) => en.kind === "field")
@@ -114,8 +124,15 @@ function sortRecord(e: Extract<Expr, { t: "rec" }>) {
     : e.entries;
 }
 
-export function normalize(e: Expr, resolve: Resolve, scope: ReadonlyMap<string, string> = new Map(), depth = 0, names: string[] = []): Expr {
-  const go = (x: Expr, s = scope, d = depth) => normalize(x, resolve, s, d, names);
+export function normalize(
+  e: Expr,
+  resolve: Resolve,
+  scope: ReadonlyMap<string, string> = new Map(),
+  depth = 0,
+  names: string[] = [],
+  opVersion: OpVersion = currentVersion,
+): Expr {
+  const go = (x: Expr, s = scope, d = depth) => normalize(x, resolve, s, d, names, opVersion);
   switch (e.t) {
     case "num":
     case "str":
@@ -157,9 +174,9 @@ export function normalize(e: Expr, resolve: Resolve, scope: ReadonlyMap<string, 
         entries: sortRecord(e).map((en) => (en.kind === "spread" ? { kind: "spread", value: go(en.value) } : { kind: "field", name: en.name, value: go(en.value) })),
       };
     case "bin":
-      return { t: "bin", op: e.op, l: go(e.l), r: go(e.r) };
+      return { t: "bin", op: e.op, ...pinned(opVersion(e.op)), l: go(e.l), r: go(e.r) };
     case "un":
-      return { t: "un", op: e.op, e: go(e.e) };
+      return { t: "un", op: e.op, ...pinned(opVersion(unaryKey(e.op))), e: go(e.e) };
     case "if":
       return { t: "if", c: go(e.c), a: go(e.a), b: go(e.b) };
   }
@@ -234,8 +251,8 @@ export function denormalize(entry: Entry, nameOf: (hash: string) => string | und
         return { t: "if", c: go(e.c, scope), a: go(e.a, scope), b: go(e.b, scope) };
     }
   };
-  // Keep the builtin versions this code was hashed against, so re-hashing it (e.g. as a dependent
-  // of an edit) never silently moves it onto a newer builtin.
+  // Keep the builtin and operator versions and the edition this code was hashed against, so
+  // re-hashing it (e.g. as a dependent of an edit) never silently moves it onto newer semantics.
   const builtins = builtinsUsed(entry.body);
   return {
     kind: entry.kind,
@@ -246,6 +263,7 @@ export function denormalize(entry: Entry, nameOf: (hash: string) => string | und
     builtins: Object.keys(builtins).length ? builtins : undefined,
     binding: entry.binding,
     partial: entry.partial,
+    edition: entry.edition ?? 1,
   };
 }
 
@@ -321,8 +339,11 @@ export function hashDecls(decls: Decl[], external: (name: string) => string | un
     const normalised = comp.map((name) => {
       const d = byName.get(name)!;
       const localNames: string[] = [];
-      const body = normalize(d.body, resolveFor(d), new Map(), 0, localNames);
-      return { d, body, localNames, payload: { kind: d.kind, sig: d.sig, body, binding: d.binding, partial: d.partial } };
+      const body = normalize(d.body, resolveFor(d), new Map(), 0, localNames, (op) => d.builtins?.[op] ?? currentVersion(op));
+      const ed = d.edition ?? EDITIONS.current;
+      checkEdition(ed, `'${d.name}'`);
+      const edition = ed === 1 ? undefined : ed;
+      return { d, body, localNames, edition, payload: { kind: d.kind, sig: d.sig, body, binding: d.binding, partial: d.partial, edition } };
     });
 
     let hashes: string[];
@@ -354,6 +375,7 @@ export function hashDecls(decls: Decl[], external: (name: string) => string | un
         group: isCycle ? { hash: groupHash!, index: i, members: hashes } : undefined,
         binding: n.d.binding,
         partial: n.d.partial,
+        edition: n.edition,
         origName: n.d.name,
       });
     });
