@@ -211,10 +211,10 @@ function updateDecls(state: State, decls: Decl[], opts: { dryRun?: boolean }): U
   // A file decl is always hashed against the current builtins, so an unedited one may still
   // have moved because a builtin it uses got a new version.
   const upgradedBuiltins = new Map(modifiedExisting.map((n) => [n, builtinChanges(state.entries[dev[n]], passA.get(n)!)]));
-  const roots = new Set([...edited, ...modifiedExisting.filter((n) => upgradedBuiltins.get(n)!.length)]);
+  const roots = edited.union(new Set(modifiedExisting.filter((n) => upgradedBuiltins.get(n)!.length)));
 
   // --- Find every existing definition that (transitively) depends on a modified one.
-  const affected = [...new Set([...transitiveDependents(state, dev, modifiedExisting.map((n) => dev[n])), ...cycleMates])].filter((n) => !fileNames.has(n));
+  const affected = [...transitiveDependents(state, dev, modifiedExisting.map((n) => dev[n])).union(new Set(cycleMates)).difference(fileNames)];
   const dependentDecls = affected.map((n) => denormalize(state.entries[dev[n]], (h) => names.get(h)));
 
   // why is each dependent affected? (shortest path back to an edited or upgraded name)
