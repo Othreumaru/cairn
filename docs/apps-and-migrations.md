@@ -1372,7 +1372,12 @@ atomic rename, so one deploy switches every instance in milliseconds (`examples/
 Test coverage and mutation testing (section 8) are built: both are cached per hash and can be
 enforced by the deploy gate through `cairn.json`. `partial def` is built, with the rule that total
 code may not call partial code, and a first `cairn risks` (partial code, plugin boundaries,
-untested code); without lists and `fold` yet, all recursion is `partial` for now.
+untested code); without lists and `fold` yet, all recursion is `partial` for now. From step 1,
+item 8 (versioned semantics) is built: operators are versioned builtins with their typing rules
+(`src/operators.ts`), definitions record their edition, both are left out of hashes at version 1,
+a runtime refuses versions and editions it does not have, `cairn upgrade [--edition]` moves code
+forward, and `cairn recheck` checks a runtime reproduces every cached result. No operator has a
+second version yet; `/@2` comes with the `Result` it returns.
 Not yet built: logical resources and per-environment config (ports are command-line flags),
 pinning plugins by package hash and upgrading pinned plugin versions, `Reply`/`Await`, the store
 split, and compare-and-swap between concurrent deployers.

@@ -1,7 +1,8 @@
 import { CairnError, type Expr } from "./ast.ts";
-import { builtin } from "./builtins.ts";
+import { builtin, checkEdition } from "./builtins.ts";
 import { branchUnit, ifNodes } from "./coverage.ts";
 import { type Entry, short } from "./hash.ts";
+import { operator, unaryKey } from "./operators.ts";
 
 /**
  * Interpreter over hash-form code. Every global is fetched by hash, so a running program
@@ -41,6 +42,7 @@ export class Evaluator {
     const entry = this.lookup(hash);
     if (!entry) throw new CairnError(`missing definition ${short(hash)} in codebase`);
     if (this.evaluating.has(hash)) throw new CairnError(`definition ${entry.origName} depends on its own value (not via a function)`);
+    checkEdition(entry.edition ?? 1, `'${entry.origName}' (${short(hash)})`);
     this.evaluating.add(hash);
     try {
       if (entry.body.t !== "lam") this.cover?.add(hash); // a function's body runs when it is applied
@@ -89,31 +91,12 @@ export class Evaluator {
         return { tag: "rec", fields: Object.freeze(fields) };
       }
       case "bin": {
-        // short-circuit boolean operators
-        if (e.op === "&&") return (this.eval(e.l, env, ctx) as boolean) && (this.eval(e.r, env, ctx) as boolean);
-        if (e.op === "||") return (this.eval(e.l, env, ctx) as boolean) || (this.eval(e.r, env, ctx) as boolean);
-        const l = this.eval(e.l, env, ctx) as any;
-        const r = this.eval(e.r, env, ctx) as any;
-        switch (e.op) {
-          case "+": return l + r;
-          case "-": return l - r;
-          case "*": return l * r;
-          case "/": return l / r;
-          case "%": return l % r;
-          case "++": return l + r;
-          case "<": return l < r;
-          case ">": return l > r;
-          case "<=": return l <= r;
-          case ">=": return l >= r;
-          case "==": return l === r;
-          case "!=": return l !== r;
-        }
-        throw new CairnError(`unknown operator ${e.op}`);
+        const op = operator(e.op, e.v ?? 1);
+        if (op.lazy) return op.impl(() => this.eval(e.l, env, ctx), () => this.eval(e.r, env, ctx));
+        return op.impl(this.eval(e.l, env, ctx), this.eval(e.r, env, ctx));
       }
-      case "un": {
-        const v = this.eval(e.e, env, ctx);
-        return e.op === "-" ? -(v as number) : !(v as boolean);
-      }
+      case "un":
+        return operator(unaryKey(e.op), e.v ?? 1).impl(this.eval(e.e, env, ctx));
       case "if": {
         const c = this.eval(e.c, env, ctx);
         if (this.cover && ctx.hash) this.cover.add(branchUnit(ctx.hash, this.ifPosition(ctx, e), c as boolean));

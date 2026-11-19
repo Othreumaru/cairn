@@ -1,4 +1,5 @@
 import { CairnError, T, type Type } from "./ast.ts";
+import { OPERATORS } from "./operators.ts";
 
 export type BuiltinImpl = (...args: any[]) => any;
 
@@ -26,7 +27,21 @@ export const BUILTINS: Record<string, Builtin> = {
   min: v1(T.fn([T.number, T.number], T.number), Math.min),
 };
 
-export const currentVersion = (name: string): number => BUILTINS[name].current;
+/** Current version of a builtin or an operator (see operators.ts): both are pinned the same way. */
+export const currentVersion = (name: string): number => (BUILTINS[name] ?? OPERATORS[name]).current;
+
+/**
+ * Editions cover changes to the language's semantics that are not one operator or builtin, such as
+ * evaluation order or subtyping rules. Every definition records the edition it was written for,
+ * left out of its hash when it is 1. New code gets `current`; existing code keeps its edition until
+ * `cairn upgrade --edition`. A runtime refuses code from an edition it does not support.
+ */
+export const EDITIONS = { current: 1, supported: new Set([1]) };
+
+export function checkEdition(edition: number, what: string): void {
+  if (!EDITIONS.supported.has(edition))
+    throw new CairnError(`this runtime cannot run ${what}: it was written for edition ${edition} (supported: ${[...EDITIONS.supported].join(", ")})`);
+}
 
 export function builtin(name: string, v: number): BuiltinVersion {
   const b = BUILTINS[name]?.versions[v];

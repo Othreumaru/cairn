@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CairnError, T } from "../src/ast.ts";
-import { BUILTINS, type BuiltinVersion } from "../src/builtins.ts";
+import { BUILTINS, type BuiltinVersion, EDITIONS } from "../src/builtins.ts";
+import { OPERATORS, type OperatorVersion } from "../src/operators.ts";
 import { Checker } from "../src/check.ts";
-import { emptyState, staleBuiltins, update, upgrade, rename, remove, view } from "../src/codebase.ts";
+import { emptyState, staleBuiltins, staleEdition, update, upgrade, rename, remove, view } from "../src/codebase.ts";
 import { parseExpr, parseProgram } from "../src/parser.ts";
 import { showDecl, showExpr } from "../src/pretty.ts";
-import { deploy, evaluate, rollback, runTests } from "../src/runtime.ts";
+import { deploy, evaluate, recheck, rollback, runTests } from "../src/runtime.ts";
 import { parseConfig } from "../src/config.ts";
 import { coverage } from "../src/coverage.ts";
 import { mutants, mutation } from "../src/mutation.ts";
@@ -355,6 +356,187 @@ test("upgrade is rejected when a new builtin type breaks a caller", () => {
     );
     assert.deepEqual(s.dev, before, "nothing applied");
   });
+});
+
+// ---------------- versioned operators and editions ----------------
+
+/** Publish a new version of an operator for the duration of `fn`. */
+function withNewOperator(name: string, next: Partial<OperatorVersion>, fn: () => void) {
+  const o = OPERATORS[name];
+  const prev = o.current;
+  o.versions[prev + 1] = { ...o.versions[prev], ...next };
+  o.current = prev + 1;
+  try {
+    fn();
+  } finally {
+    o.current = prev;
+    delete o.versions[prev + 1];
+  }
+}
+/** A stand-in for a future `/`: dividing by zero gives 0 instead of Infinity. */
+const safeDiv = (l: number, r: number) => (r === 0 ? 0 : l / r);
+
+/** Make edition `n` current (and supported) for the duration of `fn`. */
+function withEdition(n: number, fn: () => void) {
+  const prev = EDITIONS.current;
+  EDITIONS.current = n;
+  EDITIONS.supported.add(n);
+  try {
+    fn();
+  } finally {
+    EDITIONS.current = prev;
+    EDITIONS.supported.delete(n);
+  }
+}
+
+test("version 1 of every operator and edition 1 are left out of hashes, so existing hashes are unchanged", () => {
+  // Hashes computed before operators and editions were versioned.
+  const s = fresh(`def ops(a: number, b: number): boolean = -a / b + a % b * 2 - 1 >= 0 && !(a == b) || "x" ++ "y" != "xy"
+                   test t = ops(1, 2)`);
+  assert.equal(s.dev.ops, "7bfa18155f90ecf82bff7d09543758dd13accfc29a770979871b18f11a5ca312");
+  assert.equal(s.dev.t, "4c8e933ad0fb5fa4288925dd0a76c3d030014357d5386e8f8fe1ac86d9d4956f");
+  assert.equal(s.entries[s.dev.ops].edition, undefined);
+});
+
+test("an operator's version is part of the hash of code that uses it", () => {
+  const src = `def half(x: number): number = x / 2
+               def inc(x: number): number = x + 1`;
+  const s1 = fresh(src);
+  withNewOperator("/", { impl: safeDiv }, () => {
+    const s2 = fresh(src);
+    assert.notEqual(s2.dev.half, s1.dev.half);
+    assert.equal(s2.dev.inc, s1.dev.inc);
+  });
+});
+
+test("unary and binary minus are versioned separately", () => {
+  const src = `def neg(x: number): number = -x
+               def sub(x: number): number = x - 1`;
+  const s1 = fresh(src);
+  withNewOperator("unary -", { impl: (n: number) => 0 - n }, () => {
+    const s2 = fresh(src);
+    assert.notEqual(s2.dev.neg, s1.dev.neg);
+    assert.equal(s2.dev.sub, s1.dev.sub);
+    assert.deepEqual(staleBuiltins(s1.entries[s1.dev.neg]), ["unary -@1→2"]);
+  });
+});
+
+test("stored code keeps its operator version until upgraded, which re-runs exactly the affected tests", () => {
+  const s = fresh(`
+    def ratio(a: number, b: number): number = a / b
+    def plain(x: number): number = x + 1
+    test tr = ratio(1, 0) > 1000
+    test tp = plain(1) == 2`);
+  assert.ok(deploy(s).accepted);
+  withNewOperator("/", { impl: safeDiv }, () => {
+    assert.equal(evaluate(s, "ratio(1, 0)").value, "Infinity", "stored code keeps running /@1");
+    assert.equal(evaluate(s, "1 / 0").value, "0", "new code gets /@2");
+    assert.deepEqual(staleBuiltins(s.entries[s.dev.ratio]), ["/@1→2"]);
+
+    const u = upgrade(s);
+    assert.ok(u.ok);
+    assert.deepEqual(u.changes.find((c) => c.name === "ratio")!.kind, { k: "upgraded", builtins: ["/@1→2"] });
+    assert.deepEqual(u.testsToRun, ["tr"]);
+    assert.deepEqual(u.testsCached, ["tp"]);
+    assert.equal(deploy(s).accepted, false, "the behaviour change is caught by the gate");
+    assert.equal(evaluate(s, "ratio(1, 0)", "dev").value, "0");
+  });
+});
+
+test("an operator's typing rule is part of its version: upgrade is refused when callers break", () => {
+  const s = fresh(`def half(x: number): number = x / 2`);
+  const before = { ...s.dev };
+  withNewOperator("/", { synth: (t, [l, r]) => (t.check(l, T.number), t.check(r, T.number), T.string) }, () => {
+    const u = upgrade(s);
+    assert.equal(u.ok, false);
+    assert.deepEqual(
+      u.fileErrors.map((e) => e.name),
+      ["half"],
+    );
+    assert.deepEqual(s.dev, before, "nothing applied");
+  });
+});
+
+test("a runtime refuses code that uses an operator version it does not have", () => {
+  let s = emptyState();
+  withNewOperator("/", { impl: safeDiv }, () => {
+    s = fresh(`def half(x: number): number = x / 2`);
+    assert.ok(deploy(s).accepted);
+  });
+  assert.throws(() => evaluate(s, "half(4)"), /cannot run '\/'@2 \(it supports @1\)/);
+});
+
+test("mutants of a pinned operator use the other operator's first version", () => {
+  withNewOperator("+", { impl: (l: number, r: number) => l + r }, () => {
+    const s = fresh(`def inc(x: number): number = x + 1
+                     test t = inc(1) == 2`);
+    assert.ok(deploy(s).accepted); // records which tests reach which code
+    assert.equal((s.entries[s.dev.inc].body as any).body.v, 2, "inc is pinned to +@2");
+    const swapped = mutants(s.entries[s.dev.inc], parseProgram(view(s, s.dev, "inc"))[0].body).find((m) => m.label.startsWith("'+' → '-'"))!;
+    const body = (swapped.body as any).body;
+    assert.deepEqual([body.op, body.v], ["-", undefined], "-@1, not a -@2 that does not exist");
+    assert.equal(mutation(s, s.dev, "all", null).score, 100);
+  });
+});
+
+test("new code is written for the current edition, which is part of its hash; edits keep a def's edition", () => {
+  const src = `def f(x: number): number = x
+               def g(x: number): number = f(x)`;
+  const s = fresh(src);
+  withEdition(2, () => {
+    const s2 = fresh(src);
+    assert.notEqual(s2.dev.f, s.dev.f, "edition 2 is hashed");
+    assert.equal(s2.entries[s2.dev.f].edition, 2);
+
+    const r = update(s, `def f(x: number): number = x + 0
+                         def h(x: number): number = x`);
+    assert.ok(r.ok);
+    assert.equal(s.entries[s.dev.f].edition, undefined, "an edited def keeps edition 1");
+    assert.equal(s.entries[s.dev.g].edition, undefined, "so does a rehashed dependent");
+    assert.equal(s.entries[s.dev.h].edition, 2, "a new def gets the current edition");
+    assert.ok(staleEdition(s.entries[s.dev.f]));
+  });
+});
+
+test("upgrade --edition moves only code on an older edition, and a runtime without that edition refuses it", () => {
+  const s = fresh(`def f(x: number): number = x
+                   def g(x: number): number = f(x) / 2
+                   test t = g(4) == 2`);
+  assert.ok(deploy(s).accepted);
+  withEdition(2, () => {
+    withNewOperator("/", { impl: safeDiv }, () => {
+      const u = upgrade(s, { edition: true });
+      assert.ok(u.ok);
+      const kinds = Object.fromEntries(u.changes.map((c) => [c.name, c.kind]));
+      assert.deepEqual(kinds.f, { k: "upgraded", builtins: ["edition 1→2"] });
+      assert.deepEqual(kinds.g, { k: "upgraded", builtins: ["edition 1→2"] }, "the operator pin is untouched");
+      assert.deepEqual(staleBuiltins(s.entries[s.dev.g]), ["/@1→2"]);
+      assert.ok(Object.values(s.dev).every((h) => s.entries[h].edition === 2));
+      assert.ok(deploy(s).accepted);
+    });
+  });
+  assert.throws(() => evaluate(s, "g(4)"), /written for edition 2 \(supported: 1\)/);
+});
+
+test("recheck reproduces every cached result, and finds a runtime that changed an existing version", () => {
+  const s = fresh(`def half(x: number): number = x / 2
+                   test t1 = half(4) == 2
+                   test t2 = half(1) / 0 > 1000`);
+  assert.ok(deploy(s).accepted);
+  assert.deepEqual(recheck(s), { checked: 2, mismatches: [] });
+
+  const div = OPERATORS["/"].versions[1];
+  OPERATORS["/"].versions[1] = { ...div, impl: safeDiv }; // what must never happen: editing /@1 in place
+  try {
+    const r = recheck(s);
+    assert.equal(r.checked, 2);
+    assert.deepEqual(
+      r.mismatches.map((m) => [m.name, m.cached.passed, m.now.passed]),
+      [["t2", true, false]],
+    );
+  } finally {
+    OPERATORS["/"].versions[1] = div;
+  }
 });
 
 // ---------------- plugins: http ----------------

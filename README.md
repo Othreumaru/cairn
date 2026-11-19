@@ -39,7 +39,8 @@ The workflow is the Unison "scratch file" model: a source file holds only what y
 ./cairn eval 'fee({ qty: 100, price: 1 })'
 ./cairn dependents subtotal               # blast radius of a change, before you make it
 ./cairn rename fee commission             # free: no hash changes, no tests run
-./cairn upgrade                           # move code onto new builtin versions; affected tests re-run
+./cairn upgrade                           # move code onto new builtin and operator versions; affected tests re-run
+./cairn recheck                           # re-run every cached test: does this runtime reproduce each result?
 ./cairn rollback
 ```
 
@@ -194,6 +195,7 @@ one shared state file on one machine.
 | Deploy gate | `runtime.ts`, `cli.ts` | `live` is only written by `deploy`: all tests must pass, then the namespace pointer is swapped atomically. `update` runs the affected tests as soon as code is staged (failing ones are still staged, but block the deploy), so a deploy normally only reads the cache and does no work. `--skip-tests` defers them to the deploy. |
 | Rollback | `runtime.ts` | The previous namespace is just another pointer, and the code it refers to is still in the append-only store. |
 | Versioned builtins | `builtins.ts`, `hash.ts`, `codebase.ts` | Builtins are immutable and versioned; hash-form code pins `name@version`, so a builtin's version is part of every hash that uses it. Publishing a new version changes nothing stored: old code (and rollback targets) keep running the old version. `upgrade` re-hashes the code still pinned to an old version, propagates to dependents, and the next deploy re-runs exactly the tests that reach the changed builtin. Code re-hashed for an unrelated edit keeps its pins. |
+| Versioned semantics | `operators.ts`, `builtins.ts`, `hash.ts`, `runtime.ts` | Operators are versioned builtins: each version holds the operator's typing rule and behaviour, and code pins the version it was hashed against (`/@1`), upgraded like a builtin. Changes that are not one operator are editions, recorded per definition; `upgrade --edition` moves code onto the current one. Version 1 and edition 1 are left out of hashes, so code from before keeps its hash. A runtime refuses an operator version or edition it does not have, and `recheck` re-runs every cached test to show a runtime reproduces each result. |
 | Test coverage | `coverage.ts`, `eval.ts`, `config.ts` | The evaluator records the definitions and `if` branches a test reaches; the set is cached with the test's result, like the result itself. `cairn.json` sets a minimum the deploy gate enforces, over changed or all definitions. |
 | Mutation testing | `mutation.ts` | Deliberate small mistakes are evaluated in place of the original hash, only against tests whose coverage reaches the definition; verdicts are cached per (mutant, test). `cairn.json` can set a minimum score for the deploy gate. |
 | Plugins | `plugins/`, `host.ts`, `store.ts` | `@plugin(...)` bindings are checked by their plugin at update time and hashed with the def, including the plugin version. The host gives plugins a runtime and follows the state file, so one deploy switches every instance; `http` and `ws` check inputs against the declared types and project outputs onto them. |
@@ -209,7 +211,8 @@ src/
   pretty.ts     printer (code is rendered from the stored AST, like Unison)
   types.ts      subtyping, least upper bound
   check.ts      bidirectional checker
-  builtins.ts   str, len, abs, floor, round2, max, min
+  builtins.ts   str, len, abs, floor, round2, max, min; editions
+  operators.ts  operators as versioned builtins: typing rule and behaviour per version
   hash.ts       normalisation, canonical serialisation, SCC hashing, denormalisation
   eval.ts       interpreter over hash-form; globals fetched by hash
   codebase.ts   store, namespaces, update pipeline, impact report

@@ -49,6 +49,28 @@ export function runTest(state: State, hash: string, fuel = 200_000): TestResult 
   }
 }
 
+export type RecheckReport = { checked: number; mismatches: { hash: string; name: string; cached: TestResult; now: TestResult }[] };
+
+/**
+ * Re-run every test with a cached result and compare. A cached result is a permanent fact about a
+ * hash, so a runtime that gets a different result has changed the semantics of code it claims to
+ * run unchanged; that change needed a new operator or builtin version or a new edition instead.
+ * Run before releasing a runtime. The cache itself is left as it is.
+ */
+export function recheck(state: State, onCheck?: (n: number, total: number) => void): RecheckReport {
+  const hashes = Object.keys(state.testCache)
+    .filter((h) => state.entries[h])
+    .sort();
+  const mismatches: RecheckReport["mismatches"] = [];
+  hashes.forEach((h, i) => {
+    const cached = state.testCache[h];
+    const now = runTest(state, h);
+    if (now.passed !== cached.passed || now.detail !== cached.detail) mismatches.push({ hash: h, name: state.entries[h].origName, cached, now });
+    onCheck?.(i + 1, hashes.length);
+  });
+  return { checked: hashes.length, mismatches };
+}
+
 /** Path from a test to the root of the change, explaining why it had to run. */
 function whyAffected(state: State, ns: Namespace, test: string, touched: Set<string>): string[] | undefined {
   const names = invert(ns);

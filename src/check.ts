@@ -1,7 +1,8 @@
 import { CairnError, type Expr, T, type Type } from "./ast.ts";
 import { BUILTINS, builtin, currentVersion } from "./builtins.ts";
 import { showExpr, showType } from "./pretty.ts";
-import { isPrim, lub, subtype } from "./types.ts";
+import { operator, unaryKey } from "./operators.ts";
+import { lub, subtype } from "./types.ts";
 
 /**
  * Bidirectional type checking.
@@ -25,7 +26,7 @@ export class Checker {
   private globals: Globals;
   private pins: Record<string, number>;
 
-  /** @param pins builtin versions to check against (code rebuilt from the store); others use the current version */
+  /** @param pins builtin and operator versions to check against (code rebuilt from the store); others use the current version */
   constructor(globals: Globals, pins: Record<string, number> = {}) {
     this.globals = globals;
     this.pins = pins;
@@ -111,15 +112,10 @@ export class Checker {
       }
 
       case "bin":
-        return this.synthBin(e as Extract<Expr, { t: "bin" }>, locals);
+        return this.synthOp(e.op, [e.l, e.r], e, locals);
 
       case "un":
-        if (e.op === "-") {
-          this.check(e.e, T.number, locals);
-          return T.number;
-        }
-        this.check(e.e, T.boolean, locals);
-        return T.boolean;
+        return this.synthOp(unaryKey(e.op), [e.e], e, locals);
 
       case "if": {
         this.check(e.c, T.boolean, locals);
@@ -139,41 +135,19 @@ export class Checker {
     }
   }
 
-  private synthBin(e: Extract<Expr, { t: "bin" }>, locals: Locals): Type {
-    switch (e.op) {
-      case "+":
-      case "-":
-      case "*":
-      case "/":
-      case "%":
-        this.check(e.l, T.number, locals);
-        this.check(e.r, T.number, locals);
-        return T.number;
-      case "++":
-        this.check(e.l, T.string, locals);
-        this.check(e.r, T.string, locals);
-        return T.string;
-      case "<":
-      case ">":
-      case "<=":
-      case ">=":
-        this.check(e.l, T.number, locals);
-        this.check(e.r, T.number, locals);
-        return T.boolean;
-      case "&&":
-      case "||":
-        this.check(e.l, T.boolean, locals);
-        this.check(e.r, T.boolean, locals);
-        return T.boolean;
-      case "==":
-      case "!=": {
-        const lt = this.synth(e.l, locals);
-        if (!isPrim(lt)) throw err(`'${e.op}' compares number, string or boolean values, not ${showType(lt)}`, e);
-        this.check(e.r, lt, locals);
-        return T.boolean;
-      }
-    }
-    throw err(`unknown operator '${e.op}'`, e);
+  /** An operator's typing rule is part of its version, like a builtin's type. */
+  private synthOp(name: string, operands: Expr[], e: Expr, locals: Locals): Type {
+    const rule = operator(name, this.pins[name] ?? currentVersion(name)).synth;
+    return rule(
+      {
+        check: (o, t) => this.check(o, t, locals),
+        synth: (o) => this.synth(o, locals),
+        fail: (message) => {
+          throw err(message, e);
+        },
+      },
+      operands,
+    );
   }
 
   check(e: Expr, expected: Type, locals: Locals): void {
